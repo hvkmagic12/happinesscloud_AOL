@@ -1,0 +1,263 @@
+import { useEffect, useRef } from 'react'
+import { Application, Container, Sprite } from 'pixi.js'
+import { Viewport } from 'pixi-viewport'
+import gsap from 'gsap'
+import { MotionPathPlugin } from 'gsap/MotionPathPlugin'
+import type { Message } from '../types'
+import { layoutCloud } from './layout'
+import { CLOUD_LOBES, cloudBounds } from './cloudShape'
+import { getPuffTexture } from './puffTexture'
+import { puffTint } from './color'
+
+gsap.registerPlugin(MotionPathPlugin)
+
+const MIN_ZOOM = 0.35
+const MAX_ZOOM = 4
+const WORLD_PADDING = 500
+
+export interface CloudCanvasProps {
+  messages: Message[]
+  justSubmittedId?: string | null
+  onSelectPuff: (message: Message, screenX: number, screenY: number) => void
+  onJustSubmittedAnimationDone?: () => void
+}
+
+export default function CloudCanvas({
+  messages,
+  justSubmittedId,
+  onSelectPuff,
+  onJustSubmittedAnimationDone,
+}: CloudCanvasProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const appRef = useRef<Application | null>(null)
+  const viewportRef = useRef<Viewport | null>(null)
+  const puffsLayerRef = useRef<Container | null>(null)
+  const spritesRef = useRef<Map<string, Sprite>>(new Map())
+  const readyRef = useRef(false)
+  const syncPuffsRef = useRef<() => void>(() => {})
+  const animatedIdsRef = useRef<Set<string>>(new Set())
+
+  // Latest-value refs so the imperative Pixi setup (mounted once) never
+  // closes over stale props.
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+  const onSelectRef = useRef(onSelectPuff)
+  onSelectRef.current = onSelectPuff
+  const justSubmittedIdRef = useRef(justSubmittedId)
+  justSubmittedIdRef.current = justSubmittedId
+  const onJustSubmittedAnimationDoneRef = useRef(onJustSubmittedAnimationDone)
+  onJustSubmittedAnimationDoneRef.current = onJustSubmittedAnimationDone
+
+  // Mount Pixi once.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    let disposed = false
+    const app = new Application()
+    appRef.current = app
+
+    function animateEntry(sprite: Sprite, targetX: number, targetY: number) {
+      const viewport = viewportRef.current
+      const bounds = cloudBounds()
+
+      sprite.x = targetX
+      sprite.y = bounds.maxY + 400
+      sprite.alpha = 0
+      sprite.scale.set(0.3)
+
+      const controlX = targetX + (Math.random() - 0.5) * 200
+      const controlY = (sprite.y + targetY) / 2
+
+      const tl = gsap.timeline()
+      tl.to(sprite, {
+        duration: 1.3,
+        ease: 'power2.out',
+        motionPath: {
+          path: [
+            { x: sprite.x, y: sprite.y },
+            { x: controlX, y: controlY },
+            { x: targetX, y: targetY },
+          ],
+          curviness: 1.5,
+        },
+      })
+        .to(sprite, { alpha: 1, duration: 1.1, ease: 'power1.out' }, 0)
+        .to(sprite.scale, { x: 1, y: 1, duration: 1.1, ease: 'back.out(1.4)' }, 0)
+        .to(sprite.scale, { x: 1.08, y: 1.08, duration: 0.18, ease: 'sine.out' })
+        .to(sprite.scale, { x: 1, y: 1, duration: 0.22, ease: 'sine.inOut' })
+        .call(() => onJustSubmittedAnimationDoneRef.current?.())
+
+      if (viewport) {
+        viewport.animate({
+          time: 1300,
+          position: { x: targetX, y: targetY },
+          scale: Math.min(1.4, MAX_ZOOM),
+          ease: 'easeInOutSine',
+        })
+      }
+    }
+
+    function syncPuffs() {
+      const puffsLayer = puffsLayerRef.current
+      const currentApp = appRef.current
+      if (!puffsLayer || !currentApp || !readyRef.current) return
+
+      const currentMessages = messagesRef.current
+      const ids = currentMessages.map((m) => m.id)
+      const layout = layoutCloud(ids)
+      const layoutById = new Map(layout.map((l) => [l.id, l]))
+      const texture = getPuffTexture(currentApp.renderer)
+
+      for (const message of currentMessages) {
+        if (spritesRef.current.has(message.id)) continue
+        const slot = layoutById.get(message.id)
+        if (!slot) continue
+
+        const sprite = new Sprite(texture)
+        sprite.anchor.set(0.5)
+        sprite.tint = puffTint(message.hue_offset)
+        sprite.width = slot.radius * 2
+        sprite.height = slot.radius * 2
+        sprite.eventMode = 'static'
+        sprite.cursor = 'pointer'
+
+        const isJustSubmitted =
+          message.id === justSubmittedIdRef.current &&
+          !animatedIdsRef.current.has(message.id)
+
+        if (isJustSubmitted) {
+          animatedIdsRef.current.add(message.id)
+          animateEntry(sprite, slot.x, slot.y)
+        } else {
+          sprite.x = slot.x
+          sprite.y = slot.y
+          sprite.alpha = 1
+        }
+
+        sprite.on('pointertap', (event) => {
+          onSelectRef.current(message, event.global.x, event.global.y)
+        })
+
+        puffsLayer.addChild(sprite)
+        spritesRef.current.set(message.id, sprite)
+      }
+    }
+
+    syncPuffsRef.current = syncPuffs
+
+    app
+      .init({
+        resizeTo: container,
+        backgroundAlpha: 0,
+        antialias: true,
+        resolution: window.devicePixelRatio || 1,
+        autoDensity: true,
+        preference: 'webgl',
+      })
+      .then(() => {
+        if (disposed) {
+          app.destroy(true, { children: true })
+          return
+        }
+        container.appendChild(app.canvas)
+
+        const bounds = cloudBounds()
+        const worldWidth = bounds.maxX - bounds.minX + WORLD_PADDING * 2
+        const worldHeight = bounds.maxY - bounds.minY + WORLD_PADDING * 2
+
+        const viewport = new Viewport({
+          screenWidth: container.clientWidth || window.innerWidth,
+          screenHeight: container.clientHeight || window.innerHeight,
+          worldWidth,
+          worldHeight,
+          events: app.renderer.events,
+          ticker: app.ticker,
+        })
+        viewportRef.current = viewport
+        app.stage.addChild(viewport)
+
+        viewport
+          .drag()
+          .pinch()
+          .wheel()
+          .decelerate({ friction: 0.9 })
+          .clamp({
+            left: bounds.minX - WORLD_PADDING,
+            right: bounds.maxX + WORLD_PADDING,
+            top: bounds.minY - WORLD_PADDING,
+            bottom: bounds.maxY + WORLD_PADDING,
+          })
+          .clampZoom({ minScale: MIN_ZOOM, maxScale: MAX_ZOOM })
+
+        // Backdrop: a few large, very-low-opacity puffs matching the cloud
+        // lobes, so the mass reads as a cloud silhouette when zoomed out.
+        const backdropLayer = new Container()
+        const texture = getPuffTexture(app.renderer)
+        for (const lobe of CLOUD_LOBES) {
+          const sprite = new Sprite(texture)
+          sprite.anchor.set(0.5)
+          sprite.tint = puffTint(0)
+          sprite.alpha = 0.16
+          sprite.x = lobe.cx
+          sprite.y = lobe.cy
+          sprite.width = lobe.rx * 2.2
+          sprite.height = lobe.ry * 2.2
+          backdropLayer.addChild(sprite)
+        }
+        viewport.addChild(backdropLayer)
+
+        const puffsLayer = new Container()
+        viewport.addChild(puffsLayer)
+        puffsLayerRef.current = puffsLayer
+
+        // Fit the whole cloud in view initially.
+        const screenWidth = container.clientWidth || window.innerWidth
+        const screenHeight = container.clientHeight || window.innerHeight
+        const fitScale = Math.min(
+          (screenWidth * 0.85) / (bounds.maxX - bounds.minX),
+          (screenHeight * 0.85) / (bounds.maxY - bounds.minY),
+        )
+        viewport.setZoom(Math.max(MIN_ZOOM, Math.min(fitScale, MAX_ZOOM)), true)
+        viewport.moveCenter(
+          (bounds.minX + bounds.maxX) / 2,
+          (bounds.minY + bounds.maxY) / 2,
+        )
+
+        readyRef.current = true
+        syncPuffs()
+      })
+      .catch((err) => {
+        console.error('Failed to initialize the cloud canvas:', err)
+        container.innerHTML =
+          '<p style="padding:24px;color:#c22a4f;font:14px system-ui;">Something went wrong rendering the cloud. Check the browser console for details.</p>'
+      })
+
+    const resizeObserver = new ResizeObserver(() => {
+      const vp = viewportRef.current
+      if (vp && container) {
+        vp.resize(container.clientWidth, container.clientHeight)
+      }
+    })
+    resizeObserver.observe(container)
+
+    return () => {
+      disposed = true
+      resizeObserver.disconnect()
+      readyRef.current = false
+      appRef.current?.destroy(true, { children: true })
+      appRef.current = null
+      viewportRef.current = null
+      puffsLayerRef.current = null
+      spritesRef.current.clear()
+    }
+  }, [])
+
+  // Add sprites for any new messages (e.g. from realtime inserts) without
+  // rebuilding the whole scene.
+  useEffect(() => {
+    syncPuffsRef.current()
+  }, [messages])
+
+  return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+}
