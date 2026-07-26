@@ -1,4 +1,4 @@
-// Seeds ~450 fake positive messages into Supabase so pan/zoom/animation
+// Seeds fake positive messages into Supabase so pan/zoom/animation
 // performance can be checked at target scale before real event data arrives
 // (Section 7, step 10). Run with `npm run seed`.
 import { config } from 'dotenv'

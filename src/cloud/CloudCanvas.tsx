@@ -4,16 +4,26 @@ import { Viewport } from 'pixi-viewport'
 import gsap from 'gsap'
 import { MotionPathPlugin } from 'gsap/MotionPathPlugin'
 import type { Message } from '../types'
-import { layoutCloud } from './layout'
+import { createLayoutCache } from './layout'
 import { CLOUD_LOBES, cloudBounds } from './cloudShape'
 import { getPuffTexture } from './puffTexture'
 import { puffTint } from './color'
 
 gsap.registerPlugin(MotionPathPlugin)
 
-const MIN_ZOOM = 0.35
+// Placeholder zoom-out floor used only until the real one is computed at
+// mount time from actual screen size + puff/mask bounds (see minZoom in the
+// mount effect) — a fixed ratio can't account for every screen's size/aspect
+// ratio, which is what caused the initial view to crop the cloud before this
+// was made dynamic. Keep this reasonably small so it's never the binding
+// constraint before that recalculation runs.
+const MIN_ZOOM = 0.05
 const MAX_ZOOM = 4
 const WORLD_PADDING = 500
+// Margin added around the actual placed-puff bounds for the initial fit, so
+// edge puffs (plus their drift/shadow) aren't flush against the viewport
+// edge.
+const CONTENT_FIT_PADDING = 120
 // Feedback labels stay hidden while the whole cloud is in view (they'd be
 // unreadable clutter at that scale) and fade in once the viewer has zoomed
 // in far enough to read them, so nobody has to click a puff to read it.
@@ -171,6 +181,7 @@ export default function CloudCanvas({
   const animatedIdsRef = useRef<Set<string>>(new Set())
   const puffMotionRef = useRef<Map<string, PuffMotion>>(new Map())
   const enteringIdsRef = useRef<Set<string>>(new Set())
+  const layoutCacheRef = useRef(createLayoutCache())
 
   // Latest-value refs so the imperative Pixi setup (mounted once) never
   // closes over stale props.
@@ -245,8 +256,8 @@ export default function CloudCanvas({
 
       const currentMessages = messagesRef.current
       const ids = currentMessages.map((m) => m.id)
-      const layout = layoutCloud(ids)
-      const layoutById = new Map(layout.map((l) => [l.id, l]))
+      const newLayouts = layoutCacheRef.current.placeNext(ids)
+      const layoutById = new Map(newLayouts.map((l) => [l.id, l]))
       const texture = getPuffTexture(currentApp.renderer)
 
       for (const message of currentMessages) {
@@ -339,18 +350,11 @@ export default function CloudCanvas({
         viewportRef.current = viewport
         app.stage.addChild(viewport)
 
-        viewport
-          .drag()
-          .pinch()
-          .wheel()
-          .decelerate({ friction: 0.9 })
-          .clamp({
-            left: bounds.minX - WORLD_PADDING,
-            right: bounds.maxX + WORLD_PADDING,
-            top: bounds.minY - WORLD_PADDING,
-            bottom: bounds.maxY + WORLD_PADDING,
-          })
-          .clampZoom({ minScale: MIN_ZOOM, maxScale: MAX_ZOOM })
+        // Pan clamp and zoom floor are both finalized below, once the actual
+        // screen size and puff bounds are known — see the comment there for
+        // why (a fixed pan box can end up smaller than the view needed to
+        // fit content, which confuses pixi-viewport's clamp plugin).
+        viewport.drag().pinch().wheel().decelerate({ friction: 0.9 })
 
         // Backdrop: a few large, very-low-opacity puffs matching the cloud
         // lobes, so the mass reads as a cloud silhouette when zoomed out.
@@ -396,18 +400,75 @@ export default function CloudCanvas({
         viewport.on('zoomed', updateLabelVisibility)
         viewport.on('zoomed-end', updateLabelVisibility)
 
-        // Fit the whole cloud in view initially.
+        readyRef.current = true
+        syncPuffs()
+
+        // Fit the *actual current* puffs in view initially, not the full
+        // reserved mask — the mask is sized for room to grow (Section 5.2 of
+        // cloudShape.ts), so early in an event, actual content only fills a
+        // fraction of it; fitting the full mask would strand the real content
+        // as a tiny cluster in a lot of empty space.
+        const contentBounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
+        for (const motion of puffMotionRef.current.values()) {
+          contentBounds.minX = Math.min(contentBounds.minX, motion.baseX)
+          contentBounds.maxX = Math.max(contentBounds.maxX, motion.baseX)
+          contentBounds.minY = Math.min(contentBounds.minY, motion.baseY)
+          contentBounds.maxY = Math.max(contentBounds.maxY, motion.baseY)
+        }
+        const hasContent = contentBounds.minX <= contentBounds.maxX
+        const fitBounds = hasContent
+          ? {
+              minX: contentBounds.minX - CONTENT_FIT_PADDING,
+              maxX: contentBounds.maxX + CONTENT_FIT_PADDING,
+              minY: contentBounds.minY - CONTENT_FIT_PADDING,
+              maxY: contentBounds.maxY + CONTENT_FIT_PADDING,
+            }
+          : bounds
+        const fitCenterX = (fitBounds.minX + fitBounds.maxX) / 2
+        const fitCenterY = (fitBounds.minY + fitBounds.maxY) / 2
+
         const screenWidth = container.clientWidth || window.innerWidth
         const screenHeight = container.clientHeight || window.innerHeight
         const fitScale = Math.min(
+          (screenWidth * 0.85) / (fitBounds.maxX - fitBounds.minX),
+          (screenHeight * 0.85) / (fitBounds.maxY - fitBounds.minY),
+        )
+        // The zoom-out floor accommodates whichever needs to zoom out
+        // further: fitting the content, or fitting the full reserved mask
+        // (so a viewer can still zoom/pan out to see the whole shape). A
+        // fixed constant can't know the runtime screen size, so derive both
+        // here instead.
+        const fullMaskFitScale = Math.min(
           (screenWidth * 0.85) / (bounds.maxX - bounds.minX),
           (screenHeight * 0.85) / (bounds.maxY - bounds.minY),
         )
-        viewport.setZoom(Math.max(MIN_ZOOM, Math.min(fitScale, MAX_ZOOM)), true)
-        viewport.moveCenter(
-          (bounds.minX + bounds.maxX) / 2,
-          (bounds.minY + bounds.maxY) / 2,
-        )
+        const minZoom = Math.min(MIN_ZOOM, fullMaskFitScale, fitScale)
+        const appliedZoom = Math.max(minZoom, Math.min(fitScale, MAX_ZOOM))
+
+        // The pan-clamp box has to be at least as big as whatever's actually
+        // visible at appliedZoom (screen size / zoom, in world units), or the
+        // clamp plugin's left and right rules can't both be satisfied and it
+        // fights moveCenter below — the fit zoom needed for one axis often
+        // requires showing more of the other axis than the mask alone spans.
+        const visibleWorldWidth = screenWidth / appliedZoom
+        const visibleWorldHeight = screenHeight / appliedZoom
+        viewport
+          .clamp({
+            left: Math.min(bounds.minX - WORLD_PADDING, fitCenterX - visibleWorldWidth / 2),
+            right: Math.max(bounds.maxX + WORLD_PADDING, fitCenterX + visibleWorldWidth / 2),
+            top: Math.min(bounds.minY - WORLD_PADDING, fitCenterY - visibleWorldHeight / 2),
+            bottom: Math.max(bounds.maxY + WORLD_PADDING, fitCenterY + visibleWorldHeight / 2),
+            // Required: the plugin's default "center the world when it
+            // underflows the screen" path ignores the explicit bounds above
+            // and positions as though the world spanned 0..worldHeight. This
+            // cloud is centered on the origin (negative coords included), so
+            // that path would snap the view somewhere far off the content.
+            underflow: 'none',
+          })
+          .clampZoom({ minScale: minZoom, maxScale: MAX_ZOOM })
+
+        viewport.setZoom(appliedZoom, true)
+        viewport.moveCenter(fitCenterX, fitCenterY)
 
         // Gentle idle sway/rotation for every settled puff (skipped while a
         // puff is still flying in via animateEntry's own tween of x/y).
@@ -445,9 +506,6 @@ export default function CloudCanvas({
             }
           }
         })
-
-        readyRef.current = true
-        syncPuffs()
       })
       .catch((err) => {
         console.error('Failed to initialize the cloud canvas:', err)

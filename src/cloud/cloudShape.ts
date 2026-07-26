@@ -11,10 +11,19 @@ export interface Lobe {
 // Scales the whole silhouette (positions and radii alike) so the mask's
 // interior area keeps pace with layout.ts's puff size/spacing. The mask has
 // a fixed capacity for a given puff density (roughly maskArea / puffFootprint
-// puffs before the phyllotaxis spiral runs out of room), so when puffs got
-// larger and more spread out this needed to grow too — 2.3x keeps room for
-// at least ~450-600 messages, matching scripts/seed.ts's load-test scale.
-const MASK_SCALE = 2.3
+// puffs before the phyllotaxis spiral runs out of room). Capacity scales with
+// area, i.e. MASK_SCALE² — but the original "2.3 -> ~500-600 capacity"
+// estimate undershot: empirically (see scripts used to tune this), true
+// capacity at 2.3 is closer to ~740. 8.0 was chosen by simulating the actual
+// packing at various scales for an ~8000-message target (5000+ with
+// headroom): true capacity there is ~8970, comfortable room above 8000
+// without being so oversized that a partially-filled cloud reads as a plain
+// circle instead of the lobed silhouette (that happened at an earlier,
+// too-large 9.2 attempt). Puff size/spacing (layout.ts) stayed the same on
+// purpose, so the cloud's world footprint grows instead of puffs shrinking —
+// re-verify via scripts/seed.ts if the message target changes meaningfully,
+// and watch for layout.ts's "mask exhausted" warning if it's not big enough.
+const MASK_SCALE = 8.0
 
 export const CLOUD_LOBES: Lobe[] = [
   { cx: 0, cy: 100, rx: 900, ry: 260 },

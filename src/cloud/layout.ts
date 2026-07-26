@@ -29,11 +29,22 @@ const AVG_RADIUS = (MIN_RADIUS + MAX_RADIUS) / 2
 // >1 = puffs sit apart with visible gaps.)
 const PACK_DENSITY = 1.4
 
+function spiralPoint(candidate: number, c: number): { x: number; y: number } {
+  const r = c * Math.sqrt(candidate)
+  const theta = candidate * GOLDEN_ANGLE
+  return { x: r * Math.cos(theta), y: r * Math.sin(theta) }
+}
+
+function radiusFor(id: string): number {
+  return MIN_RADIUS + hash01(id) * (MAX_RADIUS - MIN_RADIUS)
+}
+
 /**
  * Packs message ids into a phyllotaxis (sunflower) spiral constrained to a
  * cloud-shaped mask, per Section 5.2. `ids` should already be in a stable
  * order (e.g. sorted by created_at) so existing messages keep their slot as
- * new ones are appended.
+ * new ones are appended. One-shot/pure — see createLayoutCache() for
+ * incremental use (e.g. across repeated realtime-insert calls).
  */
 export function layoutCloud(ids: string[]): PuffLayout[] {
   if (ids.length === 0) return []
@@ -45,39 +56,95 @@ export function layoutCloud(ids: string[]): PuffLayout[] {
   let candidate = 0
 
   while (result.length < ids.length && candidate < maxCandidates) {
-    const r = c * Math.sqrt(candidate)
-    const theta = candidate * GOLDEN_ANGLE
-    const x = r * Math.cos(theta)
-    const y = r * Math.sin(theta)
+    const { x, y } = spiralPoint(candidate, c)
 
     if (isInsideCloud(x, y, CLOUD_LOBES)) {
       const id = ids[result.length]
-      const jitter = hash01(id)
-      result.push({
-        id,
-        x,
-        y,
-        radius: MIN_RADIUS + jitter * (MAX_RADIUS - MIN_RADIUS),
-      })
+      result.push({ id, x, y, radius: radiusFor(id) })
     }
     candidate++
   }
 
-  // Fallback: if the mask ran out of room (shouldn't happen at 400-500 scale
-  // with the current density), keep following the same spiral outward past
-  // the edge of the mask rather than dropping stragglers.
+  // Fallback: if the mask ran out of room, keep following the same spiral
+  // outward past the edge of the mask rather than dropping stragglers.
   while (result.length < ids.length) {
-    const r = c * Math.sqrt(candidate)
-    const theta = candidate * GOLDEN_ANGLE
+    const { x, y } = spiralPoint(candidate, c)
     const id = ids[result.length]
-    result.push({
-      id,
-      x: r * Math.cos(theta),
-      y: r * Math.sin(theta),
-      radius: MIN_RADIUS + hash01(id) * (MAX_RADIUS - MIN_RADIUS),
-    })
+    result.push({ id, x, y, radius: radiusFor(id) })
     candidate++
   }
 
   return result
+}
+
+export interface LayoutCache {
+  /**
+   * Places any ids in `ids` not already placed by a previous call,
+   * continuing the phyllotaxis spiral from wherever the last call left off
+   * (never re-testing earlier candidate positions), and returns only the
+   * newly placed layouts. Call with the full current ids array each time —
+   * already-placed ids are cheaply skipped. Safe only when ids already
+   * placed never need to move (true here: messages are append-only/
+   * auto-approved, so an id's slot never changes once assigned).
+   */
+  placeNext(ids: string[]): PuffLayout[]
+}
+
+export function createLayoutCache(): LayoutCache {
+  const c = AVG_RADIUS * PACK_DENSITY
+  const placed = new Map<string, PuffLayout>()
+  let candidate = 0
+  let inFallback = false
+  let warnedFallback = false
+
+  function placeUnconstrained(id: string): PuffLayout {
+    const { x, y } = spiralPoint(candidate, c)
+    const layout: PuffLayout = { id, x, y, radius: radiusFor(id) }
+    placed.set(id, layout)
+    candidate++
+    return layout
+  }
+
+  return {
+    placeNext(ids) {
+      const newlyPlaced: PuffLayout[] = []
+      const maxCandidates = Math.max(500, ids.length * 40)
+
+      for (const id of ids) {
+        if (placed.has(id)) continue
+
+        if (inFallback) {
+          newlyPlaced.push(placeUnconstrained(id))
+          continue
+        }
+
+        let found = false
+        while (candidate < maxCandidates) {
+          const { x, y } = spiralPoint(candidate, c)
+          if (isInsideCloud(x, y, CLOUD_LOBES)) {
+            const layout: PuffLayout = { id, x, y, radius: radiusFor(id) }
+            placed.set(id, layout)
+            newlyPlaced.push(layout)
+            candidate++
+            found = true
+            break
+          }
+          candidate++
+        }
+
+        if (!found) {
+          inFallback = true
+          if (!warnedFallback) {
+            warnedFallback = true
+            console.warn(
+              '[layout] cloud mask exhausted — falling back to unconstrained placement',
+            )
+          }
+          newlyPlaced.push(placeUnconstrained(id))
+        }
+      }
+
+      return newlyPlaced
+    },
+  }
 }
