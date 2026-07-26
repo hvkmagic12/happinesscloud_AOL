@@ -29,6 +29,56 @@ const LABEL_MIN_FONT_SIZE = 8
 const LABEL_WIDTH_FRACTION = 0.5
 const LABEL_HEIGHT_FRACTION = 0.8
 
+// Idle drift so the cloud feels alive rather than static: each puff slowly
+// bobs around its packed slot and wobbles a couple degrees. Kept small
+// relative to puff radius (30-48px) so packed neighbors don't visibly
+// collide, and slow so it reads as a gentle sway rather than jitter.
+const DRIFT_MIN_AMPLITUDE = 3
+const DRIFT_MAX_AMPLITUDE = 7
+const DRIFT_MIN_PERIOD_MS = 3500
+const DRIFT_MAX_PERIOD_MS = 7000
+const ROTATION_MAX_RADIANS = 0.08
+const ROTATION_MIN_PERIOD_MS = 4000
+const ROTATION_MAX_PERIOD_MS = 8000
+
+interface PuffMotion {
+  baseX: number
+  baseY: number
+  phaseX: number
+  phaseY: number
+  phaseR: number
+  freqX: number
+  freqY: number
+  freqR: number
+  ampX: number
+  ampY: number
+  ampR: number
+}
+
+function randomBetween(min: number, max: number): number {
+  return min + Math.random() * (max - min)
+}
+
+function periodToFreq(periodMs: number): number {
+  return (Math.PI * 2) / periodMs
+}
+
+function makePuffMotion(baseX: number, baseY: number): PuffMotion {
+  return {
+    baseX,
+    baseY,
+    phaseX: randomBetween(0, Math.PI * 2),
+    phaseY: randomBetween(0, Math.PI * 2),
+    phaseR: randomBetween(0, Math.PI * 2),
+    freqX: periodToFreq(randomBetween(DRIFT_MIN_PERIOD_MS, DRIFT_MAX_PERIOD_MS)),
+    freqY: periodToFreq(randomBetween(DRIFT_MIN_PERIOD_MS, DRIFT_MAX_PERIOD_MS)),
+    freqR: periodToFreq(randomBetween(ROTATION_MIN_PERIOD_MS, ROTATION_MAX_PERIOD_MS)),
+    ampX: randomBetween(DRIFT_MIN_AMPLITUDE, DRIFT_MAX_AMPLITUDE),
+    ampY: randomBetween(DRIFT_MIN_AMPLITUDE, DRIFT_MAX_AMPLITUDE),
+    ampR: randomBetween(ROTATION_MAX_RADIANS * 0.4, ROTATION_MAX_RADIANS),
+  }
+}
+
 function truncateLabel(text: string): string {
   if (text.length <= LABEL_MAX_CHARS) return text
   return text.slice(0, LABEL_MAX_CHARS - 1).trimEnd() + '…'
@@ -88,6 +138,8 @@ export default function CloudCanvas({
   const readyRef = useRef(false)
   const syncPuffsRef = useRef<() => void>(() => {})
   const animatedIdsRef = useRef<Set<string>>(new Set())
+  const puffMotionRef = useRef<Map<string, PuffMotion>>(new Map())
+  const enteringIdsRef = useRef<Set<string>>(new Set())
 
   // Latest-value refs so the imperative Pixi setup (mounted once) never
   // closes over stale props.
@@ -107,9 +159,11 @@ export default function CloudCanvas({
     const app = new Application()
     appRef.current = app
 
-    function animateEntry(sprite: Sprite, targetX: number, targetY: number) {
+    function animateEntry(id: string, sprite: Sprite, targetX: number, targetY: number) {
       const viewport = viewportRef.current
       const bounds = cloudBounds()
+
+      enteringIdsRef.current.add(id)
 
       sprite.x = targetX
       sprite.y = bounds.maxY + 400
@@ -136,7 +190,10 @@ export default function CloudCanvas({
         .to(sprite.scale, { x: 1, y: 1, duration: 1.1, ease: 'back.out(1.4)' }, 0)
         .to(sprite.scale, { x: 1.08, y: 1.08, duration: 0.18, ease: 'sine.out' })
         .to(sprite.scale, { x: 1, y: 1, duration: 0.22, ease: 'sine.inOut' })
-        .call(() => onJustSubmittedAnimationDoneRef.current?.())
+        .call(() => {
+          enteringIdsRef.current.delete(id)
+          onJustSubmittedAnimationDoneRef.current?.()
+        })
 
       if (viewport) {
         viewport.animate({
@@ -184,12 +241,14 @@ export default function CloudCanvas({
 
         if (isJustSubmitted) {
           animatedIdsRef.current.add(message.id)
-          animateEntry(sprite, slot.x, slot.y)
+          animateEntry(message.id, sprite, slot.x, slot.y)
         } else {
           sprite.x = slot.x
           sprite.y = slot.y
           sprite.alpha = 1
         }
+
+        puffMotionRef.current.set(message.id, makePuffMotion(slot.x, slot.y))
 
         puffsLayer.addChild(sprite)
         labelsLayer.addChild(label)
@@ -297,6 +356,32 @@ export default function CloudCanvas({
           (bounds.minY + bounds.maxY) / 2,
         )
 
+        // Gentle idle sway/rotation for every settled puff (skipped while a
+        // puff is still flying in via animateEntry's own tween of x/y).
+        app.ticker.add(() => {
+          const now = performance.now()
+          for (const [id, sprite] of spritesRef.current) {
+            if (enteringIdsRef.current.has(id)) continue
+            const motion = puffMotionRef.current.get(id)
+            if (!motion) continue
+
+            const dx = Math.sin(now * motion.freqX + motion.phaseX) * motion.ampX
+            const dy = Math.cos(now * motion.freqY + motion.phaseY) * motion.ampY
+            const rotation = Math.sin(now * motion.freqR + motion.phaseR) * motion.ampR
+
+            sprite.x = motion.baseX + dx
+            sprite.y = motion.baseY + dy
+            sprite.rotation = rotation
+
+            const label = labelsRef.current.get(id)
+            if (label) {
+              label.x = motion.baseX + dx
+              label.y = motion.baseY + dy
+              label.rotation = rotation
+            }
+          }
+        })
+
         readyRef.current = true
         syncPuffs()
       })
@@ -325,6 +410,8 @@ export default function CloudCanvas({
       labelsLayerRef.current = null
       spritesRef.current.clear()
       labelsRef.current.clear()
+      puffMotionRef.current.clear()
+      enteringIdsRef.current.clear()
     }
   }, [])
 
