@@ -8,6 +8,14 @@ export interface Lobe {
   ry: number
 }
 
+// Scales the whole silhouette (positions and radii alike) so the mask's
+// interior area keeps pace with layout.ts's puff size/spacing. The mask has
+// a fixed capacity for a given puff density (roughly maskArea / puffFootprint
+// puffs before the phyllotaxis spiral runs out of room), so when puffs got
+// larger and more spread out this needed to grow too — 2.3x keeps room for
+// at least ~450-600 messages, matching scripts/seed.ts's load-test scale.
+const MASK_SCALE = 2.3
+
 export const CLOUD_LOBES: Lobe[] = [
   { cx: 0, cy: 100, rx: 900, ry: 260 },
   { cx: -650, cy: 20, rx: 260, ry: 220 },
@@ -15,7 +23,12 @@ export const CLOUD_LOBES: Lobe[] = [
   { cx: 140, cy: -230, rx: 400, ry: 330 },
   { cx: 560, cy: -110, rx: 320, ry: 280 },
   { cx: 820, cy: 60, rx: 240, ry: 200 },
-]
+].map((lobe) => ({
+  cx: lobe.cx * MASK_SCALE,
+  cy: lobe.cy * MASK_SCALE,
+  rx: lobe.rx * MASK_SCALE,
+  ry: lobe.ry * MASK_SCALE,
+}))
 
 export function isInsideCloud(x: number, y: number, lobes: Lobe[] = CLOUD_LOBES): boolean {
   for (const lobe of lobes) {

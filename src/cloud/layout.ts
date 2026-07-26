@@ -14,8 +14,11 @@ function hash01(id: string): number {
   return ((h >>> 0) % 100000) / 100000
 }
 
-const MIN_RADIUS = 16
-const MAX_RADIUS = 26
+// Puffs need to be large enough for their label text to fit inside them
+// (see CloudCanvas's per-label font auto-fit), so radius is sized generously
+// rather than just for visual "puffiness".
+const MIN_RADIUS = 30
+const MAX_RADIUS = 48
 const AVG_RADIUS = (MIN_RADIUS + MAX_RADIUS) / 2
 
 // Spiral spacing is derived from puff size rather than the mask's fixed
@@ -24,7 +27,7 @@ const AVG_RADIUS = (MIN_RADIUS + MAX_RADIUS) / 2
 // messages arrive, instead of many separate puffs scattered across empty
 // space. (<1 = puffs overlap their spiral neighbors; ~1 = puffs just touch;
 // >1 = puffs sit apart with visible gaps.)
-const PACK_DENSITY = 1.15
+const PACK_DENSITY = 1.4
 
 /**
  * Packs message ids into a phyllotaxis (sunflower) spiral constrained to a

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Application, Container, Sprite, Text } from 'pixi.js'
+import { Application, CanvasTextMetrics, Container, Sprite, Text, TextStyle } from 'pixi.js'
 import { Viewport } from 'pixi-viewport'
 import gsap from 'gsap'
 import { MotionPathPlugin } from 'gsap/MotionPathPlugin'
@@ -18,11 +18,52 @@ const WORLD_PADDING = 500
 // unreadable clutter at that scale) and fade in once the viewer has zoomed
 // in far enough to read them, so nobody has to click a puff to read it.
 const LABEL_ZOOM_THRESHOLD = 1.2
-const LABEL_MAX_CHARS = 70
+const LABEL_MAX_CHARS = 40
+const LABEL_BASE_FONT_SIZE = 13
+const LABEL_MIN_FONT_SIZE = 8
+// Fractions of the puff's diameter the wrapped text is allowed to occupy.
+// Width is kept much tighter than height so long phrases wrap into several
+// narrow lines (tall and skinny) rather than a few wide ones, and so the
+// block reads as sitting inside the circular puff rather than spilling
+// past its edges.
+const LABEL_WIDTH_FRACTION = 0.5
+const LABEL_HEIGHT_FRACTION = 0.8
 
 function truncateLabel(text: string): string {
   if (text.length <= LABEL_MAX_CHARS) return text
   return text.slice(0, LABEL_MAX_CHARS - 1).trimEnd() + '…'
+}
+
+// Shrinks the font size until the word-wrapped text fits within the puff's
+// target box, so short puffs get small text and large puffs get bigger text
+// instead of every label using one fixed size regardless of the puff it's on.
+function fitLabelStyle(text: string, radius: number): TextStyle {
+  const diameter = radius * 2
+  const wordWrapWidth = diameter * LABEL_WIDTH_FRACTION
+  const maxHeight = diameter * LABEL_HEIGHT_FRACTION
+
+  let fontSize = LABEL_BASE_FONT_SIZE
+  while (fontSize > LABEL_MIN_FONT_SIZE) {
+    const style = new TextStyle({
+      fontFamily: 'system-ui, sans-serif',
+      fontSize,
+      align: 'center',
+      wordWrap: true,
+      wordWrapWidth,
+    })
+    if (CanvasTextMetrics.measureText(text, style).height <= maxHeight) break
+    fontSize -= 1
+  }
+
+  return new TextStyle({
+    fontFamily: 'system-ui, sans-serif',
+    fontSize,
+    fill: '#ffffff',
+    stroke: { color: '#3a3450', width: Math.max(1, Math.round(fontSize * 0.22)) },
+    align: 'center',
+    wordWrap: true,
+    wordWrapWidth,
+  })
 }
 
 export interface CloudCanvasProps {
@@ -130,21 +171,11 @@ export default function CloudCanvas({
         sprite.width = slot.radius * 2
         sprite.height = slot.radius * 2
 
-        const label = new Text({
-          text: truncateLabel(message.text),
-          style: {
-            fontFamily: 'system-ui, sans-serif',
-            fontSize: 13,
-            fill: '#ffffff',
-            stroke: { color: '#3a3450', width: 3 },
-            align: 'center',
-            wordWrap: true,
-            wordWrapWidth: 130,
-          },
-        })
-        label.anchor.set(0.5, 0)
+        const labelText = truncateLabel(message.text)
+        const label = new Text({ text: labelText, style: fitLabelStyle(labelText, slot.radius) })
+        label.anchor.set(0.5, 0.5)
         label.x = slot.x
-        label.y = slot.y + slot.radius + 6
+        label.y = slot.y
         label.visible = labelsVisibleRef.current
 
         const isJustSubmitted =
