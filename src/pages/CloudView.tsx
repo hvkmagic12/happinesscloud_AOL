@@ -1,70 +1,21 @@
-import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { supabase } from '../lib/supabaseClient'
-import type { Message } from '../types'
+import { useLiveMessages } from '../lib/useLiveMessages'
 import CloudCanvas from '../cloud/CloudCanvas'
 import './CloudView.css'
-
-type LoadState = 'loading' | 'error' | 'ready'
 
 export default function CloudView() {
   const location = useLocation()
   const justSubmittedId = (location.state as { justSubmittedId?: string } | null)
     ?.justSubmittedId
 
-  const [messages, setMessages] = useState<Message[]>([])
-  const [state, setState] = useState<LoadState>('loading')
-  const knownIdsRef = useRef<Set<string>>(new Set())
-
-  async function load() {
-    setState('loading')
-    const { data, error } = await supabase
-      .from('messages')
-      .select('id, text, name, state, created_at, hue_offset, approved')
-      .eq('approved', true)
-      .order('created_at', { ascending: true })
-
-    if (error || !data) {
-      setState('error')
-      return
-    }
-
-    knownIdsRef.current = new Set(data.map((m) => m.id))
-    setMessages(data)
-    setState('ready')
-  }
-
-  useEffect(() => {
-    load()
-  }, [])
-
-  useEffect(() => {
-    const channel = supabase
-      .channel('messages-inserts')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages' },
-        (payload) => {
-          const row = payload.new as Message
-          if (!row.approved) return
-          if (knownIdsRef.current.has(row.id)) return
-          knownIdsRef.current.add(row.id)
-          setMessages((prev) => [...prev, row])
-        },
-      )
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [])
+  const { messages, state, reload } = useLiveMessages()
 
   return (
     <div className="cloud-view">
       {state === 'ready' && (
         <span className="cloud-counter">{messages.length} messages shared</span>
       )}
-      <Link to="/" className="cloud-back-link">
+      <Link to="/feedback" className="cloud-back-link">
         Share yours
       </Link>
 
@@ -77,7 +28,7 @@ export default function CloudView() {
       {state === 'error' && (
         <div className="cloud-state">
           <p>Couldn't load the cloud. Please check your connection and try again.</p>
-          <button type="button" className="retry-button" onClick={load}>
+          <button type="button" className="retry-button" onClick={reload}>
             Retry
           </button>
         </div>
@@ -86,7 +37,7 @@ export default function CloudView() {
       {state === 'ready' && messages.length === 0 && (
         <div className="cloud-state">
           <p>No messages yet — be the first to share something positive.</p>
-          <Link to="/" className="retry-button" style={{ textDecoration: 'none' }}>
+          <Link to="/feedback" className="retry-button" style={{ textDecoration: 'none' }}>
             Share something
           </Link>
         </div>
