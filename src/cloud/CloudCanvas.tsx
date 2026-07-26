@@ -41,6 +41,19 @@ const ROTATION_MAX_RADIANS = 0.08
 const ROTATION_MIN_PERIOD_MS = 4000
 const ROTATION_MAX_PERIOD_MS = 8000
 
+// Every puff shares one texture (Section 5.5's batching), so per-puff
+// visual variety comes from randomizing each sprite's own base rotation and
+// squash instead — the same lumpy silhouette reads differently depending on
+// which way it's turned and stretched.
+const SHAPE_SCALE_JITTER = 0.12
+
+// Soft drop shadow, offset down-right, so puffs read as sitting slightly
+// above the backdrop rather than flat against it.
+const SHADOW_OFFSET_X = 4
+const SHADOW_OFFSET_Y = 6
+const SHADOW_ALPHA = 0.16
+const SHADOW_COLOR = 0x2a2140
+
 interface PuffMotion {
   baseX: number
   baseY: number
@@ -53,6 +66,9 @@ interface PuffMotion {
   ampX: number
   ampY: number
   ampR: number
+  baseRotation: number
+  scaleX: number
+  scaleY: number
 }
 
 function randomBetween(min: number, max: number): number {
@@ -76,6 +92,9 @@ function makePuffMotion(baseX: number, baseY: number): PuffMotion {
     ampX: randomBetween(DRIFT_MIN_AMPLITUDE, DRIFT_MAX_AMPLITUDE),
     ampY: randomBetween(DRIFT_MIN_AMPLITUDE, DRIFT_MAX_AMPLITUDE),
     ampR: randomBetween(ROTATION_MAX_RADIANS * 0.4, ROTATION_MAX_RADIANS),
+    baseRotation: randomBetween(0, Math.PI * 2),
+    scaleX: 1 + randomBetween(-SHAPE_SCALE_JITTER, SHAPE_SCALE_JITTER),
+    scaleY: 1 + randomBetween(-SHAPE_SCALE_JITTER, SHAPE_SCALE_JITTER),
   }
 }
 
@@ -84,27 +103,7 @@ function truncateLabel(text: string): string {
   return text.slice(0, LABEL_MAX_CHARS - 1).trimEnd() + '…'
 }
 
-// Shrinks the font size until the word-wrapped text fits within the puff's
-// target box, so short puffs get small text and large puffs get bigger text
-// instead of every label using one fixed size regardless of the puff it's on.
-function fitLabelStyle(text: string, radius: number): TextStyle {
-  const diameter = radius * 2
-  const wordWrapWidth = diameter * LABEL_WIDTH_FRACTION
-  const maxHeight = diameter * LABEL_HEIGHT_FRACTION
-
-  let fontSize = LABEL_BASE_FONT_SIZE
-  while (fontSize > LABEL_MIN_FONT_SIZE) {
-    const style = new TextStyle({
-      fontFamily: 'system-ui, sans-serif',
-      fontSize,
-      align: 'center',
-      wordWrap: true,
-      wordWrapWidth,
-    })
-    if (CanvasTextMetrics.measureText(text, style).height <= maxHeight) break
-    fontSize -= 1
-  }
-
+function labelStyleAt(fontSize: number, wordWrapWidth: number): TextStyle {
   return new TextStyle({
     fontFamily: 'system-ui, sans-serif',
     fontSize,
@@ -114,6 +113,36 @@ function fitLabelStyle(text: string, radius: number): TextStyle {
     wordWrap: true,
     wordWrapWidth,
   })
+}
+
+// Shrinks the font size until the word-wrapped text fits within the puff's
+// target box, so short puffs get small text and large puffs get bigger text
+// instead of every label using one fixed size regardless of the puff it's on.
+// If it still doesn't fit once the font hits its floor (long text on a small
+// puff), keeps shortening the text itself so the label never spills past the
+// puff's edge.
+function fitLabel(rawText: string, radius: number): { text: string; style: TextStyle } {
+  const diameter = radius * 2
+  const wordWrapWidth = diameter * LABEL_WIDTH_FRACTION
+  const maxHeight = diameter * LABEL_HEIGHT_FRACTION
+
+  let text = truncateLabel(rawText)
+
+  let fontSize = LABEL_BASE_FONT_SIZE
+  let style = labelStyleAt(fontSize, wordWrapWidth)
+  while (
+    fontSize > LABEL_MIN_FONT_SIZE &&
+    CanvasTextMetrics.measureText(text, style).height > maxHeight
+  ) {
+    fontSize -= 1
+    style = labelStyleAt(fontSize, wordWrapWidth)
+  }
+
+  while (text.length > 1 && CanvasTextMetrics.measureText(text, style).height > maxHeight) {
+    text = text.slice(0, -2).trimEnd() + '…'
+  }
+
+  return { text, style }
 }
 
 export interface CloudCanvasProps {
@@ -130,9 +159,11 @@ export default function CloudCanvas({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const appRef = useRef<Application | null>(null)
   const viewportRef = useRef<Viewport | null>(null)
+  const shadowsLayerRef = useRef<Container | null>(null)
   const puffsLayerRef = useRef<Container | null>(null)
   const labelsLayerRef = useRef<Container | null>(null)
   const spritesRef = useRef<Map<string, Sprite>>(new Map())
+  const shadowsRef = useRef<Map<string, Sprite>>(new Map())
   const labelsRef = useRef<Map<string, Text>>(new Map())
   const labelsVisibleRef = useRef(false)
   const readyRef = useRef(false)
@@ -206,10 +237,11 @@ export default function CloudCanvas({
     }
 
     function syncPuffs() {
+      const shadowsLayer = shadowsLayerRef.current
       const puffsLayer = puffsLayerRef.current
       const labelsLayer = labelsLayerRef.current
       const currentApp = appRef.current
-      if (!puffsLayer || !labelsLayer || !currentApp || !readyRef.current) return
+      if (!shadowsLayer || !puffsLayer || !labelsLayer || !currentApp || !readyRef.current) return
 
       const currentMessages = messagesRef.current
       const ids = currentMessages.map((m) => m.id)
@@ -222,14 +254,27 @@ export default function CloudCanvas({
         const slot = layoutById.get(message.id)
         if (!slot) continue
 
+        const motion = makePuffMotion(slot.x, slot.y)
+        puffMotionRef.current.set(message.id, motion)
+        const width = slot.radius * 2 * motion.scaleX
+        const height = slot.radius * 2 * motion.scaleY
+
+        const shadow = new Sprite(texture)
+        shadow.anchor.set(0.5)
+        shadow.tint = SHADOW_COLOR
+        shadow.width = width
+        shadow.height = height
+        shadow.rotation = motion.baseRotation
+
         const sprite = new Sprite(texture)
         sprite.anchor.set(0.5)
         sprite.tint = puffTint(message.hue_offset)
-        sprite.width = slot.radius * 2
-        sprite.height = slot.radius * 2
+        sprite.width = width
+        sprite.height = height
+        sprite.rotation = motion.baseRotation
 
-        const labelText = truncateLabel(message.text)
-        const label = new Text({ text: labelText, style: fitLabelStyle(labelText, slot.radius) })
+        const { text: labelText, style: labelStyle } = fitLabel(message.text, slot.radius)
+        const label = new Text({ text: labelText, style: labelStyle })
         label.anchor.set(0.5, 0.5)
         label.x = slot.x
         label.y = slot.y
@@ -241,17 +286,21 @@ export default function CloudCanvas({
 
         if (isJustSubmitted) {
           animatedIdsRef.current.add(message.id)
+          shadow.alpha = 0
           animateEntry(message.id, sprite, slot.x, slot.y)
         } else {
           sprite.x = slot.x
           sprite.y = slot.y
           sprite.alpha = 1
+          shadow.x = slot.x + SHADOW_OFFSET_X
+          shadow.y = slot.y + SHADOW_OFFSET_Y
+          shadow.alpha = SHADOW_ALPHA
         }
 
-        puffMotionRef.current.set(message.id, makePuffMotion(slot.x, slot.y))
-
+        shadowsLayer.addChild(shadow)
         puffsLayer.addChild(sprite)
         labelsLayer.addChild(label)
+        shadowsRef.current.set(message.id, shadow)
         spritesRef.current.set(message.id, sprite)
         labelsRef.current.set(message.id, label)
       }
@@ -320,6 +369,10 @@ export default function CloudCanvas({
         }
         viewport.addChild(backdropLayer)
 
+        const shadowsLayer = new Container()
+        viewport.addChild(shadowsLayer)
+        shadowsLayerRef.current = shadowsLayer
+
         const puffsLayer = new Container()
         viewport.addChild(puffsLayer)
         puffsLayerRef.current = puffsLayer
@@ -361,23 +414,34 @@ export default function CloudCanvas({
         app.ticker.add(() => {
           const now = performance.now()
           for (const [id, sprite] of spritesRef.current) {
-            if (enteringIdsRef.current.has(id)) continue
             const motion = puffMotionRef.current.get(id)
-            if (!motion) continue
+            if (motion && !enteringIdsRef.current.has(id)) {
+              const dx = Math.sin(now * motion.freqX + motion.phaseX) * motion.ampX
+              const dy = Math.cos(now * motion.freqY + motion.phaseY) * motion.ampY
+              const wobble = Math.sin(now * motion.freqR + motion.phaseR) * motion.ampR
 
-            const dx = Math.sin(now * motion.freqX + motion.phaseX) * motion.ampX
-            const dy = Math.cos(now * motion.freqY + motion.phaseY) * motion.ampY
-            const rotation = Math.sin(now * motion.freqR + motion.phaseR) * motion.ampR
+              sprite.x = motion.baseX + dx
+              sprite.y = motion.baseY + dy
+              sprite.rotation = motion.baseRotation + wobble
 
-            sprite.x = motion.baseX + dx
-            sprite.y = motion.baseY + dy
-            sprite.rotation = rotation
+              const label = labelsRef.current.get(id)
+              if (label) {
+                label.x = motion.baseX + dx
+                label.y = motion.baseY + dy
+                label.rotation = wobble
+              }
+            }
 
-            const label = labelsRef.current.get(id)
-            if (label) {
-              label.x = motion.baseX + dx
-              label.y = motion.baseY + dy
-              label.rotation = rotation
+            // Shadow always mirrors the puff's current transform (idle or
+            // still flying in via animateEntry's tween) rather than tracking
+            // its own motion, so it never drifts out of sync.
+            const shadow = shadowsRef.current.get(id)
+            if (shadow) {
+              shadow.x = sprite.x + SHADOW_OFFSET_X
+              shadow.y = sprite.y + SHADOW_OFFSET_Y
+              shadow.rotation = sprite.rotation
+              shadow.alpha = sprite.alpha * SHADOW_ALPHA
+              shadow.scale.copyFrom(sprite.scale)
             }
           }
         })
@@ -406,9 +470,11 @@ export default function CloudCanvas({
       appRef.current?.destroy(true, { children: true })
       appRef.current = null
       viewportRef.current = null
+      shadowsLayerRef.current = null
       puffsLayerRef.current = null
       labelsLayerRef.current = null
       spritesRef.current.clear()
+      shadowsRef.current.clear()
       labelsRef.current.clear()
       puffMotionRef.current.clear()
       enteringIdsRef.current.clear()

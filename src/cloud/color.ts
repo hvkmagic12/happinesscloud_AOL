@@ -1,11 +1,14 @@
-// Base puff hue is a warm pink; hue_offset (stored per-message) adds subtle
-// variation so puffs aren't all identical (Section 5.2).
+// Base puff hue is a warm pink; hue_offset (stored per-message, range ±15)
+// adds variation so puffs aren't all identical (Section 5.2). It's spread
+// wider than its stored range so the cloud reads as a varied mix of warm
+// pinks, corals, and purples rather than one narrow band.
 const BASE_HUE = 336
+const HUE_SPREAD = 4
 const SATURATION = 0.82
 const LIGHTNESS = 0.72
 
 export function puffTint(hueOffset: number): number {
-  const h = ((BASE_HUE + hueOffset) % 360 + 360) % 360
+  const h = ((BASE_HUE + hueOffset * HUE_SPREAD) % 360 + 360) % 360
   return hslToHex(h, SATURATION, LIGHTNESS)
 }
 
