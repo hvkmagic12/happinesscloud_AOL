@@ -37,6 +37,7 @@ export default function SubmitView() {
       .single()
 
     if (insertError || !data) {
+      console.error('Failed to insert message:', insertError)
       setError("Couldn't send your message. Please try again.")
       setSubmitting(false)
       return
