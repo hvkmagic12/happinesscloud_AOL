@@ -20,7 +20,7 @@ export default function CloudView() {
     setState('loading')
     const { data, error } = await supabase
       .from('messages')
-      .select('id, text, created_at, hue_offset, approved')
+      .select('id, text, name, state, created_at, hue_offset, approved')
       .eq('approved', true)
       .order('created_at', { ascending: true })
 

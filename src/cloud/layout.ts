@@ -21,10 +21,10 @@ const AVG_RADIUS = (MIN_RADIUS + MAX_RADIUS) / 2
 // Spiral spacing is derived from puff size rather than the mask's fixed
 // extent, so a handful of messages cluster into one tight blob near the
 // center and only spread toward the mask's full lobed silhouette as more
-// messages arrive - overlapping neighbors so the group reads as one solid
-// cumulus mass instead of many separate puffs scattered across empty space.
-// (<1 = puffs overlap their spiral neighbors; ~1 = puffs just touch.)
-const PACK_DENSITY = 0.75
+// messages arrive, instead of many separate puffs scattered across empty
+// space. (<1 = puffs overlap their spiral neighbors; ~1 = puffs just touch;
+// >1 = puffs sit apart with visible gaps.)
+const PACK_DENSITY = 1.15
 
 /**
  * Packs message ids into a phyllotaxis (sunflower) spiral constrained to a

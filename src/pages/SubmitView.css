@@ -33,6 +33,31 @@
   font-size: 15px;
 }
 
+.submit-name-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.submit-input {
+  flex: 1;
+  min-width: 0;
+  border-radius: 14px;
+  border: 1px solid #e3d9ec;
+  padding: 12px 14px;
+  font-size: 15px;
+  font-family: inherit;
+  color: #3a3450;
+  background: #fff;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.submit-input:focus {
+  border-color: #f2a6c9;
+}
+
 .submit-textarea {
   width: 100%;
   min-height: 96px;

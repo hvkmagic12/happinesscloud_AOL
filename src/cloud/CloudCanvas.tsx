@@ -135,7 +135,8 @@ export default function CloudCanvas({
           style: {
             fontFamily: 'system-ui, sans-serif',
             fontSize: 13,
-            fill: '#2b3a4a',
+            fill: '#ffffff',
+            stroke: { color: '#3a3450', width: 3 },
             align: 'center',
             wordWrap: true,
             wordWrapWidth: 130,
