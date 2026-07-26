@@ -47,7 +47,7 @@ export default function SubmitView() {
         <form onSubmit={handleSubmit}>
           <textarea
             className="submit-textarea"
-            placeholder="Something that made you smile..."
+            placeholder="Something you're grateful for..."
             value={text}
             maxLength={MAX_LENGTH + 20}
             onChange={(e) => setText(e.target.value)}

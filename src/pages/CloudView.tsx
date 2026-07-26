@@ -3,7 +3,6 @@ import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabaseClient'
 import type { Message } from '../types'
 import CloudCanvas from '../cloud/CloudCanvas'
-import MessagePopup from '../components/MessagePopup'
 import './CloudView.css'
 
 type LoadState = 'loading' | 'error' | 'ready'
@@ -15,9 +14,6 @@ export default function CloudView() {
 
   const [messages, setMessages] = useState<Message[]>([])
   const [state, setState] = useState<LoadState>('loading')
-  const [selected, setSelected] = useState<
-    { message: Message; x: number; y: number } | null
-  >(null)
   const knownIdsRef = useRef<Set<string>>(new Set())
 
   async function load() {
@@ -97,20 +93,7 @@ export default function CloudView() {
       )}
 
       {state === 'ready' && messages.length > 0 && (
-        <CloudCanvas
-          messages={messages}
-          justSubmittedId={justSubmittedId}
-          onSelectPuff={(message, x, y) => setSelected({ message, x, y })}
-        />
-      )}
-
-      {selected && (
-        <MessagePopup
-          text={selected.message.text}
-          x={selected.x}
-          y={selected.y}
-          onClose={() => setSelected(null)}
-        />
+        <CloudCanvas messages={messages} justSubmittedId={justSubmittedId} />
       )}
     </div>
   )

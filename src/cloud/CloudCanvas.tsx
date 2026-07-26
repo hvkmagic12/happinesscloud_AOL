@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Application, Container, Sprite } from 'pixi.js'
+import { Application, Container, Sprite, Text } from 'pixi.js'
 import { Viewport } from 'pixi-viewport'
 import gsap from 'gsap'
 import { MotionPathPlugin } from 'gsap/MotionPathPlugin'
@@ -14,25 +14,36 @@ gsap.registerPlugin(MotionPathPlugin)
 const MIN_ZOOM = 0.35
 const MAX_ZOOM = 4
 const WORLD_PADDING = 500
+// Feedback labels stay hidden while the whole cloud is in view (they'd be
+// unreadable clutter at that scale) and fade in once the viewer has zoomed
+// in far enough to read them, so nobody has to click a puff to read it.
+const LABEL_ZOOM_THRESHOLD = 1.2
+const LABEL_MAX_CHARS = 70
+
+function truncateLabel(text: string): string {
+  if (text.length <= LABEL_MAX_CHARS) return text
+  return text.slice(0, LABEL_MAX_CHARS - 1).trimEnd() + '…'
+}
 
 export interface CloudCanvasProps {
   messages: Message[]
   justSubmittedId?: string | null
-  onSelectPuff: (message: Message, screenX: number, screenY: number) => void
   onJustSubmittedAnimationDone?: () => void
 }
 
 export default function CloudCanvas({
   messages,
   justSubmittedId,
-  onSelectPuff,
   onJustSubmittedAnimationDone,
 }: CloudCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const appRef = useRef<Application | null>(null)
   const viewportRef = useRef<Viewport | null>(null)
   const puffsLayerRef = useRef<Container | null>(null)
+  const labelsLayerRef = useRef<Container | null>(null)
   const spritesRef = useRef<Map<string, Sprite>>(new Map())
+  const labelsRef = useRef<Map<string, Text>>(new Map())
+  const labelsVisibleRef = useRef(false)
   const readyRef = useRef(false)
   const syncPuffsRef = useRef<() => void>(() => {})
   const animatedIdsRef = useRef<Set<string>>(new Set())
@@ -41,8 +52,6 @@ export default function CloudCanvas({
   // closes over stale props.
   const messagesRef = useRef(messages)
   messagesRef.current = messages
-  const onSelectRef = useRef(onSelectPuff)
-  onSelectRef.current = onSelectPuff
   const justSubmittedIdRef = useRef(justSubmittedId)
   justSubmittedIdRef.current = justSubmittedId
   const onJustSubmittedAnimationDoneRef = useRef(onJustSubmittedAnimationDone)
@@ -100,8 +109,9 @@ export default function CloudCanvas({
 
     function syncPuffs() {
       const puffsLayer = puffsLayerRef.current
+      const labelsLayer = labelsLayerRef.current
       const currentApp = appRef.current
-      if (!puffsLayer || !currentApp || !readyRef.current) return
+      if (!puffsLayer || !labelsLayer || !currentApp || !readyRef.current) return
 
       const currentMessages = messagesRef.current
       const ids = currentMessages.map((m) => m.id)
@@ -119,8 +129,22 @@ export default function CloudCanvas({
         sprite.tint = puffTint(message.hue_offset)
         sprite.width = slot.radius * 2
         sprite.height = slot.radius * 2
-        sprite.eventMode = 'static'
-        sprite.cursor = 'pointer'
+
+        const label = new Text({
+          text: truncateLabel(message.text),
+          style: {
+            fontFamily: 'system-ui, sans-serif',
+            fontSize: 13,
+            fill: '#2b3a4a',
+            align: 'center',
+            wordWrap: true,
+            wordWrapWidth: 130,
+          },
+        })
+        label.anchor.set(0.5, 0)
+        label.x = slot.x
+        label.y = slot.y + slot.radius + 6
+        label.visible = labelsVisibleRef.current
 
         const isJustSubmitted =
           message.id === justSubmittedIdRef.current &&
@@ -135,12 +159,10 @@ export default function CloudCanvas({
           sprite.alpha = 1
         }
 
-        sprite.on('pointertap', (event) => {
-          onSelectRef.current(message, event.global.x, event.global.y)
-        })
-
         puffsLayer.addChild(sprite)
+        labelsLayer.addChild(label)
         spritesRef.current.set(message.id, sprite)
+        labelsRef.current.set(message.id, label)
       }
     }
 
@@ -211,6 +233,25 @@ export default function CloudCanvas({
         viewport.addChild(puffsLayer)
         puffsLayerRef.current = puffsLayer
 
+        const labelsLayer = new Container()
+        viewport.addChild(labelsLayer)
+        labelsLayerRef.current = labelsLayer
+
+        // Toggle feedback labels on/off as the viewer crosses the zoom
+        // threshold, instead of requiring a click to read each message.
+        function updateLabelVisibility() {
+          const vp = viewportRef.current
+          if (!vp) return
+          const shouldShow = vp.scale.x >= LABEL_ZOOM_THRESHOLD
+          if (shouldShow === labelsVisibleRef.current) return
+          labelsVisibleRef.current = shouldShow
+          for (const label of labelsRef.current.values()) {
+            label.visible = shouldShow
+          }
+        }
+        viewport.on('zoomed', updateLabelVisibility)
+        viewport.on('zoomed-end', updateLabelVisibility)
+
         // Fit the whole cloud in view initially.
         const screenWidth = container.clientWidth || window.innerWidth
         const screenHeight = container.clientHeight || window.innerHeight
@@ -249,7 +290,9 @@ export default function CloudCanvas({
       appRef.current = null
       viewportRef.current = null
       puffsLayerRef.current = null
+      labelsLayerRef.current = null
       spritesRef.current.clear()
+      labelsRef.current.clear()
     }
   }, [])
 
