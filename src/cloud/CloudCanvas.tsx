@@ -30,6 +30,14 @@ const CONTENT_FIT_PADDING = 120
 // unreadable clutter at that scale) and fade in once the viewer has zoomed
 // in far enough to read them, so nobody has to click a puff to read it.
 const LABEL_ZOOM_THRESHOLD = 1.2
+// How far beyond the viewport edge (world units) puffs are still updated and
+// labelled, so panning reveals finished puffs rather than blanks.
+const CULL_MARGIN = 500
+// Labels built per frame. Enough that a screenful appears within a couple of
+// frames, few enough that no single frame stalls rasterising text.
+const LABEL_ACQUIRE_PER_FRAME = 40
+// Below this much on-screen movement, a puff's sway isn't worth computing.
+const DRIFT_VISIBLE_PIXELS = 0.75
 const LABEL_MAX_CHARS = 40
 const LABEL_BASE_FONT_SIZE = 13
 const LABEL_MIN_FONT_SIZE = 8
@@ -232,7 +240,16 @@ export default function CloudCanvas({
   const labelsLayerRef = useRef<Container | null>(null)
   const spritesRef = useRef<Map<string, Sprite>>(new Map())
   const shadowsRef = useRef<Map<string, Sprite>>(new Map())
-  const labelsRef = useRef<Map<string, Text>>(new Map())
+  // Labels are built on demand for the handful of puffs actually on screen,
+  // never up front for the whole cloud: a Text is a rasterised canvas, and
+  // making thousands of them visible at once stalls for seconds.
+  // labelSource holds the cheap data a label is built from; fittedLabels
+  // memoises the expensive measure-and-shrink pass; activeLabels are the ones
+  // currently on screen; labelPool holds Text objects to reuse.
+  const labelSourceRef = useRef<Map<string, { text: string; radius: number }>>(new Map())
+  const fittedLabelsRef = useRef<Map<string, { text: string; style: TextStyle }>>(new Map())
+  const activeLabelsRef = useRef<Map<string, Text>>(new Map())
+  const labelPoolRef = useRef<Text[]>([])
   // Zoom alone says labels are readable; labelsVisibleRef is the effective
   // state, which also requires the portrait not to be on screen.
   const labelsZoomedInRef = useRef(false)
@@ -327,7 +344,48 @@ export default function CloudCanvas({
       }
     }
 
-    // Labels fade in once the viewer has zoomed in far enough to read them
+    // Builds (or recycles) the Text for one puff. The measure-and-shrink pass
+    // in fitLabel is the expensive part, so its result is memoised per
+    // message — a label that scrolls off screen and back costs nothing the
+    // second time.
+    function acquireLabel(id: string): Text | undefined {
+      const layer = labelsLayerRef.current
+      const source = labelSourceRef.current.get(id)
+      if (!layer || !source) return undefined
+
+      let fitted = fittedLabelsRef.current.get(id)
+      if (!fitted) {
+        fitted = fitLabel(source.text, source.radius)
+        fittedLabelsRef.current.set(id, fitted)
+      }
+
+      let label = labelPoolRef.current.pop()
+      if (label) {
+        label.text = fitted.text
+        label.style = fitted.style
+      } else {
+        label = new Text({ text: fitted.text, style: fitted.style })
+        label.anchor.set(0.5, 0.5)
+        layer.addChild(label)
+      }
+      label.visible = true
+      activeLabelsRef.current.set(id, label)
+      return label
+    }
+
+    function releaseLabel(id: string) {
+      const label = activeLabelsRef.current.get(id)
+      if (!label) return
+      label.visible = false
+      activeLabelsRef.current.delete(id)
+      labelPoolRef.current.push(label)
+    }
+
+    function releaseAllLabels() {
+      for (const id of [...activeLabelsRef.current.keys()]) releaseLabel(id)
+    }
+
+    // Labels appear once the viewer has zoomed in far enough to read them
     // (they'd be unreadable clutter at full-cloud scale), and stay hidden
     // while the portrait is assembled, where they'd cover the drawing.
     function applyLabelVisibility() {
@@ -339,9 +397,9 @@ export default function CloudCanvas({
         assembleProgressRef.current.value < PORTRAIT_LABEL_CUTOFF
       if (visible === labelsVisibleRef.current) return
       labelsVisibleRef.current = visible
-      for (const label of labelsRef.current.values()) {
-        label.visible = visible
-      }
+      // Which labels exist is decided per frame by what's on screen; this
+      // only has to hand them all back when labels switch off entirely.
+      if (!visible) releaseAllLabels()
     }
 
     function contentCentre() {
@@ -454,12 +512,12 @@ export default function CloudCanvas({
         motion.targetTint = tint
         motion.targetScale = sprite.scale.x
 
-        const { text: labelText, style: labelStyle } = fitLabel(message.text, slot.radius)
-        const label = new Text({ text: labelText, style: labelStyle })
-        label.anchor.set(0.5, 0.5)
-        label.x = slot.x
-        label.y = slot.y
-        label.visible = labelsVisibleRef.current
+        // Only the raw ingredients — the Text itself is built later, and only
+        // if this puff is ever actually looked at.
+        labelSourceRef.current.set(message.id, {
+          text: message.text,
+          radius: slot.radius,
+        })
 
         const isJustSubmitted =
           message.id === justSubmittedIdRef.current &&
@@ -480,10 +538,8 @@ export default function CloudCanvas({
 
         shadowsLayer.addChild(shadow)
         puffsLayer.addChild(sprite)
-        labelsLayer.addChild(label)
         shadowsRef.current.set(message.id, shadow)
         spritesRef.current.set(message.id, sprite)
-        labelsRef.current.set(message.id, label)
       }
 
       // A message arriving while the portrait is on screen still belongs in
@@ -708,6 +764,18 @@ export default function CloudCanvas({
           // that would otherwise touch every puff in the cloud every frame.
           if (progress >= 1 && !progressChanged && !targetsDirty) return
 
+          // Zoomed out far enough that a puff's whole drift travels less than
+          // a pixel on screen, the sway is invisible — and that's exactly the
+          // view where every puff in the cloud is on screen at once. Holding
+          // them still costs nothing and looks identical.
+          if (
+            !progressChanged &&
+            !targetsDirty &&
+            DRIFT_MAX_AMPLITUDE * viewport.scale.x < DRIFT_VISIBLE_PIXELS
+          ) {
+            return
+          }
+
           const driftScale = 1 - progress
           // Shadows fade to nothing as the portrait forms — offset copies of
           // every pixel would only muddy the drawing — so past this point
@@ -730,13 +798,43 @@ export default function CloudCanvas({
           // rewriting them per frame across thousands of sprites is the
           // expensive part of this loop.
           const writeAppearance = progressChanged || targetsDirty
-          // Labels are hidden at low zoom and while the portrait is up;
-          // there's no point moving thousands of invisible Text objects.
+          // Labels are hidden at low zoom and while the portrait is up.
           const writeLabels = labelsVisibleRef.current
+          // Everything below is limited to puffs on or near the screen. A
+          // puff's position is a pure function of the clock and its own
+          // constants, so one left stale off screen is simply correct again
+          // on the frame it returns — there's no drift to accumulate. Zoomed
+          // in, this is a few hundred puffs instead of every one in the
+          // cloud; the margin keeps a screen's worth ready just out of sight
+          // so panning reveals finished puffs rather than blanks.
+          const view = viewport.getVisibleBounds()
+          const cullLeft = view.x - CULL_MARGIN
+          const cullRight = view.x + view.width + CULL_MARGIN
+          const cullTop = view.y - CULL_MARGIN
+          const cullBottom = view.y + view.height + CULL_MARGIN
+          // Rasterising a Text is not free, so a burst of newly-revealed
+          // labels is spread over a few frames rather than stalling one.
+          let acquireBudget = LABEL_ACQUIRE_PER_FRAME
 
           for (const [id, sprite] of spritesRef.current) {
             const motion = puffMotionRef.current.get(id)
             if (motion && !enteringIdsRef.current.has(id)) {
+              // Where the puff sits ignoring its sway — cheap to derive, and
+              // within a few units of the real position at any progress, so
+              // it's a sound basis for the cull test without having to
+              // update the sprite first.
+              const settledX = lerp(motion.baseX, motion.targetX, progress)
+              const settledY = lerp(motion.baseY, motion.targetY, progress)
+              if (
+                settledX < cullLeft ||
+                settledX > cullRight ||
+                settledY < cullTop ||
+                settledY > cullBottom
+              ) {
+                if (activeLabelsRef.current.has(id)) releaseLabel(id)
+                continue
+              }
+
               const dx =
                 Math.sin(now * motion.freqX + motion.phaseX) * motion.ampX * driftScale
               const dy =
@@ -757,7 +855,11 @@ export default function CloudCanvas({
               }
 
               if (writeLabels) {
-                const label = labelsRef.current.get(id)
+                let label = activeLabelsRef.current.get(id)
+                if (!label && acquireBudget > 0) {
+                  label = acquireLabel(id)
+                  acquireBudget--
+                }
                 if (label) {
                   label.x = sprite.x
                   label.y = sprite.y
@@ -812,7 +914,10 @@ export default function CloudCanvas({
       labelsLayerRef.current = null
       spritesRef.current.clear()
       shadowsRef.current.clear()
-      labelsRef.current.clear()
+      labelSourceRef.current.clear()
+      fittedLabelsRef.current.clear()
+      activeLabelsRef.current.clear()
+      labelPoolRef.current.length = 0
       puffMotionRef.current.clear()
       enteringIdsRef.current.clear()
     }

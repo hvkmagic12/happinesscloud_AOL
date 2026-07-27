@@ -2,6 +2,7 @@ import { Link, useLocation } from 'react-router-dom'
 import { useLiveMessages } from '../lib/useLiveMessages'
 import { useCloudCommands } from '../lib/useCloudCommands'
 import CloudCanvas from '../cloud/CloudCanvas'
+import EventHeading from '../components/EventHeading'
 import './CloudView.css'
 
 export default function CloudView() {
@@ -22,6 +23,7 @@ export default function CloudView() {
       <Link to="/feedback" className="cloud-back-link">
         Share yours
       </Link>
+      <EventHeading />
 
       {state === 'loading' && (
         <div className="cloud-state">

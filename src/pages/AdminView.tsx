@@ -1,6 +1,7 @@
 import { useLiveMessages } from '../lib/useLiveMessages'
 import { useCloudCommands } from '../lib/useCloudCommands'
 import CloudCanvas from '../cloud/CloudCanvas'
+import EventHeading from '../components/EventHeading'
 import './AdminView.css'
 
 export default function AdminView() {
@@ -22,6 +23,7 @@ export default function AdminView() {
           {assembled ? 'Release' : 'Assemble'}
         </button>
       )}
+      <EventHeading />
 
       {state === 'loading' && (
         <div className="admin-state">

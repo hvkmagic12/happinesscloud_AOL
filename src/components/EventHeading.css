@@ -1,0 +1,54 @@
+.event-heading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  padding: 18px 16px 0;
+  text-align: center;
+  /* Decorative only — drag and pinch belong to the canvas underneath. */
+  pointer-events: none;
+  /* The counter and action button sit in the top corners, so on narrow
+     screens the heading is inset to stay clear of them. */
+  padding-left: max(16px, 26vw);
+  padding-right: max(16px, 26vw);
+}
+
+.event-heading-title {
+  margin: 0;
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  /* Scales with the viewport so it reads on a phone and on a projector
+     without needing breakpoints. */
+  font-size: clamp(28px, 5.2vw, 64px);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+  color: #3a3450;
+  /* Keeps the text legible wherever puffs drift behind it. */
+  text-shadow: 0 2px 14px rgba(255, 255, 255, 0.85);
+}
+
+.event-heading-place {
+  margin: 4px 0 0;
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  font-size: clamp(13px, 1.9vw, 24px);
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #6b6379;
+  text-shadow: 0 2px 10px rgba(255, 255, 255, 0.85);
+}
+
+@media (max-width: 640px) {
+  .event-heading {
+    /* On phones the corner controls sit above the heading rather than
+       beside it, so the inset is dropped and the block moves down. */
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-top: 58px;
+  }
+
+  .event-heading-place {
+    letter-spacing: 0.12em;
+  }
+}
