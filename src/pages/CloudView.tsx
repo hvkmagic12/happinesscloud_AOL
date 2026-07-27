@@ -1,5 +1,6 @@
 import { Link, useLocation } from 'react-router-dom'
 import { useLiveMessages } from '../lib/useLiveMessages'
+import { useCloudCommands } from '../lib/useCloudCommands'
 import CloudCanvas from '../cloud/CloudCanvas'
 import './CloudView.css'
 
@@ -9,6 +10,9 @@ export default function CloudView() {
     ?.justSubmittedId
 
   const { messages, state, reload } = useLiveMessages()
+  // Read-only here: only the admin page can trigger the assembly, but every
+  // viewer follows along live.
+  const { assembled } = useCloudCommands()
 
   return (
     <div className="cloud-view">
@@ -44,7 +48,11 @@ export default function CloudView() {
       )}
 
       {state === 'ready' && messages.length > 0 && (
-        <CloudCanvas messages={messages} justSubmittedId={justSubmittedId} />
+        <CloudCanvas
+          messages={messages}
+          justSubmittedId={justSubmittedId}
+          assembled={assembled}
+        />
       )}
     </div>
   )

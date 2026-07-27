@@ -2,6 +2,10 @@ import { Texture, type Renderer } from 'pixi.js'
 
 let cached: Texture | null = null
 
+// Edge length of the generated texture. Exported so callers can convert a
+// desired on-screen puff diameter into a sprite scale.
+export const PUFF_TEXTURE_SIZE = 256
+
 // Lumps arranged around the center (as fractions of the base radius) so the
 // silhouette reads as a fluffy cumulus cluster instead of a plain circle.
 // Fixed rather than randomized because the texture is shared/tinted across

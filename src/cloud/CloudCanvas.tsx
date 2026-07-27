@@ -6,8 +6,10 @@ import { MotionPathPlugin } from 'gsap/MotionPathPlugin'
 import type { Message } from '../types'
 import { createLayoutCache } from './layout'
 import { CLOUD_LOBES, cloudBounds } from './cloudShape'
-import { getPuffTexture } from './puffTexture'
+import { getPuffTexture, PUFF_TEXTURE_SIZE } from './puffTexture'
 import { puffTint } from './color'
+import { buildPortraitLayout, isPortraitReady, preloadPortrait } from './portrait'
+import type { PortraitLayout } from './portrait'
 
 gsap.registerPlugin(MotionPathPlugin)
 
@@ -64,6 +66,19 @@ const SHADOW_OFFSET_Y = 6
 const SHADOW_ALPHA = 0.16
 const SHADOW_COLOR = 0x2a2140
 
+// "Assemble": the whole cloud gathers into the Gurudev portrait, each puff
+// acting as one pixel of the drawing, then disperses back.
+const ASSEMBLE_DURATION_S = 3.2
+const DISPERSE_DURATION_S = 2.4
+// World size of one portrait pixel, matched to typical puff diameter
+// (radius 30-48, so ~78 across) so puffs tile the drawing without gaps.
+const PORTRAIT_CELL_SIZE = 78
+// Assembled puffs run slightly larger than their cell so strokes read as
+// solid rather than as a screen of separate dots.
+const PORTRAIT_PUFF_OVERLAP = 1.3
+// Labels would obscure the picture, so they're hidden past this progress.
+const PORTRAIT_LABEL_CUTOFF = 0.05
+
 interface PuffMotion {
   baseX: number
   baseY: number
@@ -76,9 +91,22 @@ interface PuffMotion {
   ampX: number
   ampY: number
   ampR: number
+  // Normalised to [-π, π] so unwinding to 0 while assembling takes the short
+  // way round rather than spinning most of a full turn.
   baseRotation: number
   scaleX: number
   scaleY: number
+  // Resting appearance, captured once the sprite exists. Assembling
+  // interpolates from these toward the portrait's target* values below.
+  baseScaleX: number
+  baseScaleY: number
+  baseTint: number
+  // Where this puff sits in the portrait. Defaults to its resting state so
+  // the interpolation is a no-op until a portrait has been assigned.
+  targetX: number
+  targetY: number
+  targetTint: number
+  targetScale: number
 }
 
 function randomBetween(min: number, max: number): number {
@@ -87,6 +115,24 @@ function randomBetween(min: number, max: number): number {
 
 function periodToFreq(periodMs: number): number {
   return (Math.PI * 2) / periodMs
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t
+}
+
+function lerpTint(a: number, b: number, t: number): number {
+  const ar = (a >> 16) & 0xff
+  const ag = (a >> 8) & 0xff
+  const ab = a & 0xff
+  const br = (b >> 16) & 0xff
+  const bg = (b >> 8) & 0xff
+  const bb = b & 0xff
+  return (
+    (Math.round(ar + (br - ar) * t) << 16) |
+    (Math.round(ag + (bg - ag) * t) << 8) |
+    Math.round(ab + (bb - ab) * t)
+  )
 }
 
 function makePuffMotion(baseX: number, baseY: number): PuffMotion {
@@ -102,9 +148,17 @@ function makePuffMotion(baseX: number, baseY: number): PuffMotion {
     ampX: randomBetween(DRIFT_MIN_AMPLITUDE, DRIFT_MAX_AMPLITUDE),
     ampY: randomBetween(DRIFT_MIN_AMPLITUDE, DRIFT_MAX_AMPLITUDE),
     ampR: randomBetween(ROTATION_MAX_RADIANS * 0.4, ROTATION_MAX_RADIANS),
-    baseRotation: randomBetween(0, Math.PI * 2),
+    baseRotation: randomBetween(-Math.PI, Math.PI),
     scaleX: 1 + randomBetween(-SHAPE_SCALE_JITTER, SHAPE_SCALE_JITTER),
     scaleY: 1 + randomBetween(-SHAPE_SCALE_JITTER, SHAPE_SCALE_JITTER),
+    // Overwritten in syncPuffs as soon as the sprite is built.
+    baseScaleX: 1,
+    baseScaleY: 1,
+    baseTint: 0xffffff,
+    targetX: baseX,
+    targetY: baseY,
+    targetTint: 0xffffff,
+    targetScale: 1,
   }
 }
 
@@ -159,22 +213,29 @@ export interface CloudCanvasProps {
   messages: Message[]
   justSubmittedId?: string | null
   onJustSubmittedAnimationDone?: () => void
+  /** When true, the cloud gathers into the Gurudev portrait. */
+  assembled?: boolean
 }
 
 export default function CloudCanvas({
   messages,
   justSubmittedId,
   onJustSubmittedAnimationDone,
+  assembled = false,
 }: CloudCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const appRef = useRef<Application | null>(null)
   const viewportRef = useRef<Viewport | null>(null)
+  const backdropLayerRef = useRef<Container | null>(null)
   const shadowsLayerRef = useRef<Container | null>(null)
   const puffsLayerRef = useRef<Container | null>(null)
   const labelsLayerRef = useRef<Container | null>(null)
   const spritesRef = useRef<Map<string, Sprite>>(new Map())
   const shadowsRef = useRef<Map<string, Sprite>>(new Map())
   const labelsRef = useRef<Map<string, Text>>(new Map())
+  // Zoom alone says labels are readable; labelsVisibleRef is the effective
+  // state, which also requires the portrait not to be on screen.
+  const labelsZoomedInRef = useRef(false)
   const labelsVisibleRef = useRef(false)
   const readyRef = useRef(false)
   const syncPuffsRef = useRef<() => void>(() => {})
@@ -182,6 +243,16 @@ export default function CloudCanvas({
   const puffMotionRef = useRef<Map<string, PuffMotion>>(new Map())
   const enteringIdsRef = useRef<Set<string>>(new Set())
   const layoutCacheRef = useRef(createLayoutCache())
+  // Single tweened value the ticker reads, rather than tweening thousands of
+  // sprites individually: 0 = cloud at rest, 1 = fully assembled portrait.
+  const assembleProgressRef = useRef({ value: 0 })
+  const portraitLayoutRef = useRef<PortraitLayout | null>(null)
+  // Forces one more ticker pass after targets change while already
+  // assembled (the loop otherwise short-circuits when nothing is moving).
+  const targetsDirtyRef = useRef(false)
+  const runAssembleRef = useRef<(next: boolean) => void>(() => {})
+  const assembledRef = useRef(assembled)
+  assembledRef.current = assembled
 
   // Latest-value refs so the imperative Pixi setup (mounted once) never
   // closes over stale props.
@@ -200,6 +271,15 @@ export default function CloudCanvas({
     let disposed = false
     const app = new Application()
     appRef.current = app
+
+    // Decode the portrait up front so an assemble command can fire with no
+    // image-loading latency in the way — every screen has to start together.
+    preloadPortrait()
+      .then(() => {
+        // The command may have arrived while the image was still loading.
+        if (!disposed && assembledRef.current) runAssembleRef.current(true)
+      })
+      .catch((err) => console.error(err))
 
     function animateEntry(id: string, sprite: Sprite, targetX: number, targetY: number) {
       const viewport = viewportRef.current
@@ -247,6 +327,89 @@ export default function CloudCanvas({
       }
     }
 
+    // Labels fade in once the viewer has zoomed in far enough to read them
+    // (they'd be unreadable clutter at full-cloud scale), and stay hidden
+    // while the portrait is assembled, where they'd cover the drawing.
+    function applyLabelVisibility() {
+      const vp = viewportRef.current
+      if (!vp) return
+      labelsZoomedInRef.current = vp.scale.x >= LABEL_ZOOM_THRESHOLD
+      const visible =
+        labelsZoomedInRef.current &&
+        assembleProgressRef.current.value < PORTRAIT_LABEL_CUTOFF
+      if (visible === labelsVisibleRef.current) return
+      labelsVisibleRef.current = visible
+      for (const label of labelsRef.current.values()) {
+        label.visible = visible
+      }
+    }
+
+    function contentCentre() {
+      const motions = puffMotionRef.current
+      let x = 0
+      let y = 0
+      for (const motion of motions.values()) {
+        x += motion.baseX
+        y += motion.baseY
+      }
+      return motions.size > 0 ? { x: x / motions.size, y: y / motions.size } : { x: 0, y: 0 }
+    }
+
+    /**
+     * Gives every puff its pixel slot in the portrait. Returns false when
+     * there's nothing to assemble yet (no puffs, or the image hasn't
+     * finished loading).
+     */
+    function assignPortraitTargets(): boolean {
+      const entries = [...puffMotionRef.current.values()]
+      if (entries.length === 0 || !isPortraitReady()) return false
+
+      // Centre the portrait on the cloud so the gather reads as the cloud
+      // itself reshaping rather than flying off somewhere else.
+      const centre = contentCentre()
+      const layout = buildPortraitLayout(
+        entries.length,
+        PORTRAIT_CELL_SIZE,
+        centre.x,
+        centre.y,
+      )
+      if (layout.targets.length === 0) return false
+
+      // Pair puffs to slots by angle around the centre, so the cloud swirls
+      // inward keeping its rough left/right/top/bottom relationships instead
+      // of puffs streaming across each other. Both sides sort by the same
+      // deterministic key, and puff positions are themselves deterministic,
+      // so every client resolves the identical picture without having to
+      // send any of it over the wire.
+      const angleKey = (x: number, y: number) => Math.atan2(y - centre.y, x - centre.x)
+      const radiusKey = (x: number, y: number) => Math.hypot(x - centre.x, y - centre.y)
+      entries.sort(
+        (a, b) =>
+          angleKey(a.baseX, a.baseY) - angleKey(b.baseX, b.baseY) ||
+          radiusKey(a.baseX, a.baseY) - radiusKey(b.baseX, b.baseY),
+      )
+      const targets = layout.targets
+        .slice()
+        .sort(
+          (a, b) =>
+            angleKey(a.x, a.y) - angleKey(b.x, b.y) ||
+            radiusKey(a.x, a.y) - radiusKey(b.x, b.y),
+        )
+
+      const targetScale = (PORTRAIT_CELL_SIZE * PORTRAIT_PUFF_OVERLAP) / PUFF_TEXTURE_SIZE
+      for (let i = 0; i < entries.length; i++) {
+        const motion = entries[i]
+        const target = targets[i % targets.length]
+        motion.targetX = target.x
+        motion.targetY = target.y
+        motion.targetTint = target.tint
+        motion.targetScale = targetScale
+      }
+
+      portraitLayoutRef.current = layout
+      return true
+    }
+
     function syncPuffs() {
       const shadowsLayer = shadowsLayerRef.current
       const puffsLayer = puffsLayerRef.current
@@ -277,12 +440,19 @@ export default function CloudCanvas({
         shadow.height = height
         shadow.rotation = motion.baseRotation
 
+        const tint = puffTint(message.hue_offset)
         const sprite = new Sprite(texture)
         sprite.anchor.set(0.5)
-        sprite.tint = puffTint(message.hue_offset)
+        sprite.tint = tint
         sprite.width = width
         sprite.height = height
         sprite.rotation = motion.baseRotation
+
+        motion.baseScaleX = sprite.scale.x
+        motion.baseScaleY = sprite.scale.y
+        motion.baseTint = tint
+        motion.targetTint = tint
+        motion.targetScale = sprite.scale.x
 
         const { text: labelText, style: labelStyle } = fitLabel(message.text, slot.radius)
         const label = new Text({ text: labelText, style: labelStyle })
@@ -314,6 +484,12 @@ export default function CloudCanvas({
         shadowsRef.current.set(message.id, shadow)
         spritesRef.current.set(message.id, sprite)
         labelsRef.current.set(message.id, label)
+      }
+
+      // A message arriving while the portrait is on screen still belongs in
+      // the picture, so re-fit the drawing to the new puff count.
+      if (assembledRef.current && assignPortraitTargets()) {
+        targetsDirtyRef.current = true
       }
     }
 
@@ -372,6 +548,7 @@ export default function CloudCanvas({
           backdropLayer.addChild(sprite)
         }
         viewport.addChild(backdropLayer)
+        backdropLayerRef.current = backdropLayer
 
         const shadowsLayer = new Container()
         viewport.addChild(shadowsLayer)
@@ -385,124 +562,223 @@ export default function CloudCanvas({
         viewport.addChild(labelsLayer)
         labelsLayerRef.current = labelsLayer
 
-        // Toggle feedback labels on/off as the viewer crosses the zoom
-        // threshold, instead of requiring a click to read each message.
-        function updateLabelVisibility() {
-          const vp = viewportRef.current
-          if (!vp) return
-          const shouldShow = vp.scale.x >= LABEL_ZOOM_THRESHOLD
-          if (shouldShow === labelsVisibleRef.current) return
-          labelsVisibleRef.current = shouldShow
-          for (const label of labelsRef.current.values()) {
-            label.visible = shouldShow
+        viewport.on('zoomed', applyLabelVisibility)
+        viewport.on('zoomed-end', applyLabelVisibility)
+
+        // Frames a world-space box: sizes the pan clamp and zoom floor around
+        // it, then snaps (animateMs === null) or eases the camera there.
+        // Shared by the initial fit and by assemble/disperse, which all need
+        // the same clamp-vs-fit reconciliation.
+        function frameBounds(
+          box: { minX: number; maxX: number; minY: number; maxY: number },
+          animateMs: number | null,
+        ) {
+          const el = containerRef.current
+          const screenWidth = el?.clientWidth || window.innerWidth
+          const screenHeight = el?.clientHeight || window.innerHeight
+          const centerX = (box.minX + box.maxX) / 2
+          const centerY = (box.minY + box.maxY) / 2
+
+          const fitScale = Math.min(
+            (screenWidth * 0.85) / (box.maxX - box.minX),
+            (screenHeight * 0.85) / (box.maxY - box.minY),
+          )
+          // The zoom-out floor accommodates whichever needs to zoom out
+          // further: this box, or the full reserved mask (so a viewer can
+          // still pull back to the whole shape). A fixed constant can't know
+          // the runtime screen size, so derive both here instead.
+          const fullMaskFitScale = Math.min(
+            (screenWidth * 0.85) / (bounds.maxX - bounds.minX),
+            (screenHeight * 0.85) / (bounds.maxY - bounds.minY),
+          )
+          const minZoom = Math.min(MIN_ZOOM, fullMaskFitScale, fitScale)
+          const appliedZoom = Math.max(minZoom, Math.min(fitScale, MAX_ZOOM))
+
+          // The pan-clamp box has to be at least as big as whatever's
+          // actually visible (screen size / zoom, in world units), or the
+          // clamp plugin's left and right rules can't both be satisfied and
+          // it fights moveCenter below — the fit zoom needed for one axis
+          // often requires showing more of the other axis than the mask
+          // alone spans. Use the widest zoom the camera passes through, so
+          // an animated move doesn't get clamped part-way.
+          const widestZoom = Math.min(appliedZoom, viewport.scale.x || appliedZoom)
+          const visibleWorldWidth = screenWidth / widestZoom
+          const visibleWorldHeight = screenHeight / widestZoom
+          viewport
+            .clamp({
+              left: Math.min(bounds.minX - WORLD_PADDING, centerX - visibleWorldWidth / 2),
+              right: Math.max(bounds.maxX + WORLD_PADDING, centerX + visibleWorldWidth / 2),
+              top: Math.min(bounds.minY - WORLD_PADDING, centerY - visibleWorldHeight / 2),
+              bottom: Math.max(bounds.maxY + WORLD_PADDING, centerY + visibleWorldHeight / 2),
+              // Required: the plugin's default "center the world when it
+              // underflows the screen" path ignores the explicit bounds above
+              // and positions as though the world spanned 0..worldHeight. This
+              // cloud is centered on the origin (negative coords included), so
+              // that path would snap the view somewhere far off the content.
+              underflow: 'none',
+            })
+            .clampZoom({ minScale: minZoom, maxScale: MAX_ZOOM })
+
+          if (animateMs === null) {
+            viewport.setZoom(appliedZoom, true)
+            viewport.moveCenter(centerX, centerY)
+          } else {
+            viewport.animate({
+              time: animateMs,
+              position: { x: centerX, y: centerY },
+              scale: appliedZoom,
+              ease: 'easeInOutSine',
+            })
           }
         }
-        viewport.on('zoomed', updateLabelVisibility)
-        viewport.on('zoomed-end', updateLabelVisibility)
+
+        // The mask is sized with room to grow, so early in an event actual
+        // content fills only a fraction of it — framing the whole mask would
+        // strand the real messages as a tiny cluster in empty space.
+        function contentFitBounds() {
+          const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
+          for (const motion of puffMotionRef.current.values()) {
+            box.minX = Math.min(box.minX, motion.baseX)
+            box.maxX = Math.max(box.maxX, motion.baseX)
+            box.minY = Math.min(box.minY, motion.baseY)
+            box.maxY = Math.max(box.maxY, motion.baseY)
+          }
+          if (box.minX > box.maxX) return bounds
+          return {
+            minX: box.minX - CONTENT_FIT_PADDING,
+            maxX: box.maxX + CONTENT_FIT_PADDING,
+            minY: box.minY - CONTENT_FIT_PADDING,
+            maxY: box.maxY + CONTENT_FIT_PADDING,
+          }
+        }
+
+        function runAssemble(next: boolean) {
+          if (next) {
+            if (!assignPortraitTargets()) return
+            const layout = portraitLayoutRef.current
+            if (!layout) return
+
+            gsap.to(assembleProgressRef.current, {
+              value: 1,
+              duration: ASSEMBLE_DURATION_S,
+              ease: 'power2.inOut',
+              overwrite: true,
+            })
+            const centre = contentCentre()
+            frameBounds(
+              {
+                minX: centre.x - layout.width / 2,
+                maxX: centre.x + layout.width / 2,
+                minY: centre.y - layout.height / 2,
+                maxY: centre.y + layout.height / 2,
+              },
+              ASSEMBLE_DURATION_S * 1000,
+            )
+          } else {
+            gsap.to(assembleProgressRef.current, {
+              value: 0,
+              duration: DISPERSE_DURATION_S,
+              ease: 'power2.inOut',
+              overwrite: true,
+            })
+            frameBounds(contentFitBounds(), DISPERSE_DURATION_S * 1000)
+          }
+        }
+        runAssembleRef.current = runAssemble
 
         readyRef.current = true
         syncPuffs()
+        frameBounds(contentFitBounds(), null)
 
-        // Fit the *actual current* puffs in view initially, not the full
-        // reserved mask — the mask is sized for room to grow (Section 5.2 of
-        // cloudShape.ts), so early in an event, actual content only fills a
-        // fraction of it; fitting the full mask would strand the real content
-        // as a tiny cluster in a lot of empty space.
-        const contentBounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
-        for (const motion of puffMotionRef.current.values()) {
-          contentBounds.minX = Math.min(contentBounds.minX, motion.baseX)
-          contentBounds.maxX = Math.max(contentBounds.maxX, motion.baseX)
-          contentBounds.minY = Math.min(contentBounds.minY, motion.baseY)
-          contentBounds.maxY = Math.max(contentBounds.maxY, motion.baseY)
-        }
-        const hasContent = contentBounds.minX <= contentBounds.maxX
-        const fitBounds = hasContent
-          ? {
-              minX: contentBounds.minX - CONTENT_FIT_PADDING,
-              maxX: contentBounds.maxX + CONTENT_FIT_PADDING,
-              minY: contentBounds.minY - CONTENT_FIT_PADDING,
-              maxY: contentBounds.maxY + CONTENT_FIT_PADDING,
-            }
-          : bounds
-        const fitCenterX = (fitBounds.minX + fitBounds.maxX) / 2
-        const fitCenterY = (fitBounds.minY + fitBounds.maxY) / 2
+        // An assemble command can land before Pixi finishes initialising.
+        if (assembledRef.current) runAssemble(true)
 
-        const screenWidth = container.clientWidth || window.innerWidth
-        const screenHeight = container.clientHeight || window.innerHeight
-        const fitScale = Math.min(
-          (screenWidth * 0.85) / (fitBounds.maxX - fitBounds.minX),
-          (screenHeight * 0.85) / (fitBounds.maxY - fitBounds.minY),
-        )
-        // The zoom-out floor accommodates whichever needs to zoom out
-        // further: fitting the content, or fitting the full reserved mask
-        // (so a viewer can still zoom/pan out to see the whole shape). A
-        // fixed constant can't know the runtime screen size, so derive both
-        // here instead.
-        const fullMaskFitScale = Math.min(
-          (screenWidth * 0.85) / (bounds.maxX - bounds.minX),
-          (screenHeight * 0.85) / (bounds.maxY - bounds.minY),
-        )
-        const minZoom = Math.min(MIN_ZOOM, fullMaskFitScale, fitScale)
-        const appliedZoom = Math.max(minZoom, Math.min(fitScale, MAX_ZOOM))
-
-        // The pan-clamp box has to be at least as big as whatever's actually
-        // visible at appliedZoom (screen size / zoom, in world units), or the
-        // clamp plugin's left and right rules can't both be satisfied and it
-        // fights moveCenter below — the fit zoom needed for one axis often
-        // requires showing more of the other axis than the mask alone spans.
-        const visibleWorldWidth = screenWidth / appliedZoom
-        const visibleWorldHeight = screenHeight / appliedZoom
-        viewport
-          .clamp({
-            left: Math.min(bounds.minX - WORLD_PADDING, fitCenterX - visibleWorldWidth / 2),
-            right: Math.max(bounds.maxX + WORLD_PADDING, fitCenterX + visibleWorldWidth / 2),
-            top: Math.min(bounds.minY - WORLD_PADDING, fitCenterY - visibleWorldHeight / 2),
-            bottom: Math.max(bounds.maxY + WORLD_PADDING, fitCenterY + visibleWorldHeight / 2),
-            // Required: the plugin's default "center the world when it
-            // underflows the screen" path ignores the explicit bounds above
-            // and positions as though the world spanned 0..worldHeight. This
-            // cloud is centered on the origin (negative coords included), so
-            // that path would snap the view somewhere far off the content.
-            underflow: 'none',
-          })
-          .clampZoom({ minScale: minZoom, maxScale: MAX_ZOOM })
-
-        viewport.setZoom(appliedZoom, true)
-        viewport.moveCenter(fitCenterX, fitCenterY)
-
-        // Gentle idle sway/rotation for every settled puff (skipped while a
-        // puff is still flying in via animateEntry's own tween of x/y).
+        // Gentle idle sway/rotation for every settled puff, blended toward
+        // that puff's pixel slot in the portrait as assemble progress rises.
+        // Puffs still flying in via animateEntry's own tween are skipped.
+        let lastProgress = -1
         app.ticker.add(() => {
+          const progress = assembleProgressRef.current.value
+          const progressChanged = progress !== lastProgress
+          const targetsDirty = targetsDirtyRef.current
+          lastProgress = progress
+          targetsDirtyRef.current = false
+
+          // Fully assembled and settled: nothing is moving, so skip a loop
+          // that would otherwise touch every puff in the cloud every frame.
+          if (progress >= 1 && !progressChanged && !targetsDirty) return
+
+          const driftScale = 1 - progress
+          // Shadows fade to nothing as the portrait forms — offset copies of
+          // every pixel would only muddy the drawing — so past this point
+          // they can be hidden outright, which skips both the per-frame
+          // updates below and the cost of rendering them.
+          const showShadows = driftScale > 0.1
+
+          if (progressChanged) {
+            applyLabelVisibility()
+            // The soft cloud silhouette behind the puffs would show through
+            // the drawing and muddy it, so it fades out as the portrait forms.
+            const backdrop = backdropLayerRef.current
+            if (backdrop) backdrop.alpha = driftScale
+            const shadowsLayer = shadowsLayerRef.current
+            if (shadowsLayer) shadowsLayer.visible = showShadows
+          }
+
           const now = performance.now()
+          // Tint and scale only change while a transition is running, and
+          // rewriting them per frame across thousands of sprites is the
+          // expensive part of this loop.
+          const writeAppearance = progressChanged || targetsDirty
+          // Labels are hidden at low zoom and while the portrait is up;
+          // there's no point moving thousands of invisible Text objects.
+          const writeLabels = labelsVisibleRef.current
+
           for (const [id, sprite] of spritesRef.current) {
             const motion = puffMotionRef.current.get(id)
             if (motion && !enteringIdsRef.current.has(id)) {
-              const dx = Math.sin(now * motion.freqX + motion.phaseX) * motion.ampX
-              const dy = Math.cos(now * motion.freqY + motion.phaseY) * motion.ampY
-              const wobble = Math.sin(now * motion.freqR + motion.phaseR) * motion.ampR
+              const dx =
+                Math.sin(now * motion.freqX + motion.phaseX) * motion.ampX * driftScale
+              const dy =
+                Math.cos(now * motion.freqY + motion.phaseY) * motion.ampY * driftScale
+              const wobble =
+                Math.sin(now * motion.freqR + motion.phaseR) * motion.ampR * driftScale
 
-              sprite.x = motion.baseX + dx
-              sprite.y = motion.baseY + dy
-              sprite.rotation = motion.baseRotation + wobble
+              sprite.x = lerp(motion.baseX + dx, motion.targetX, progress)
+              sprite.y = lerp(motion.baseY + dy, motion.targetY, progress)
+              sprite.rotation = motion.baseRotation * driftScale + wobble
 
-              const label = labelsRef.current.get(id)
-              if (label) {
-                label.x = motion.baseX + dx
-                label.y = motion.baseY + dy
-                label.rotation = wobble
+              if (writeAppearance) {
+                sprite.tint = lerpTint(motion.baseTint, motion.targetTint, progress)
+                sprite.scale.set(
+                  lerp(motion.baseScaleX, motion.targetScale, progress),
+                  lerp(motion.baseScaleY, motion.targetScale, progress),
+                )
+              }
+
+              if (writeLabels) {
+                const label = labelsRef.current.get(id)
+                if (label) {
+                  label.x = sprite.x
+                  label.y = sprite.y
+                  label.rotation = wobble
+                }
               }
             }
 
-            // Shadow always mirrors the puff's current transform (idle or
-            // still flying in via animateEntry's tween) rather than tracking
-            // its own motion, so it never drifts out of sync.
-            const shadow = shadowsRef.current.get(id)
-            if (shadow) {
-              shadow.x = sprite.x + SHADOW_OFFSET_X
-              shadow.y = sprite.y + SHADOW_OFFSET_Y
-              shadow.rotation = sprite.rotation
-              shadow.alpha = sprite.alpha * SHADOW_ALPHA
-              shadow.scale.copyFrom(sprite.scale)
+            // Shadow always mirrors the puff's current transform (idle,
+            // assembling, or still flying in via animateEntry's tween)
+            // rather than tracking its own motion, so it never drifts out of
+            // sync.
+            if (showShadows) {
+              const shadow = shadowsRef.current.get(id)
+              if (shadow) {
+                shadow.x = sprite.x + SHADOW_OFFSET_X
+                shadow.y = sprite.y + SHADOW_OFFSET_Y
+                shadow.rotation = sprite.rotation
+                shadow.alpha = sprite.alpha * SHADOW_ALPHA * driftScale
+                shadow.scale.copyFrom(sprite.scale)
+              }
             }
           }
         })
@@ -525,9 +801,12 @@ export default function CloudCanvas({
       disposed = true
       resizeObserver.disconnect()
       readyRef.current = false
+      gsap.killTweensOf(assembleProgressRef.current)
+      runAssembleRef.current = () => {}
       appRef.current?.destroy(true, { children: true })
       appRef.current = null
       viewportRef.current = null
+      backdropLayerRef.current = null
       shadowsLayerRef.current = null
       puffsLayerRef.current = null
       labelsLayerRef.current = null
@@ -544,6 +823,13 @@ export default function CloudCanvas({
   useEffect(() => {
     syncPuffsRef.current()
   }, [messages])
+
+  // Assemble into / disperse from the portrait whenever the shared command
+  // changes. Before Pixi finishes initialising this is a no-op, and the
+  // mount path picks up the current state instead.
+  useEffect(() => {
+    runAssembleRef.current(assembled)
+  }, [assembled])
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
 }

@@ -21,6 +21,37 @@
   box-shadow: 0 4px 16px rgba(80, 60, 120, 0.12);
 }
 
+.assemble-button {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 5;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  color: #fff;
+  background: linear-gradient(135deg, #f993bd, #f7788f);
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(244, 120, 155, 0.35);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.assemble-button:hover {
+  box-shadow: 0 10px 26px rgba(244, 120, 155, 0.45);
+}
+
+.assemble-button:active {
+  transform: scale(0.97);
+}
+
+.assemble-button.is-assembled {
+  background: linear-gradient(135deg, #8f86c9, #6f66ad);
+  box-shadow: 0 8px 22px rgba(90, 80, 150, 0.35);
+}
+
 .admin-state {
   position: absolute;
   inset: 0;
