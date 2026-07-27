@@ -1,8 +1,14 @@
 // Turns the Gurudev portrait into a set of target slots — one per puff — so
 // the cloud can reassemble itself into the picture, each puff acting as a
 // single pixel. The image is sampled into a grid whose resolution is chosen
-// so the number of "ink" (dark) cells lands as close as possible to the
-// number of puffs currently in the cloud.
+// so the number of "ink" cells lands as close as possible to the number of
+// puffs currently in the cloud.
+//
+// The source is a photograph of a charcoal drawing rather than clean line
+// art, so the constants below were measured against it rather than guessed;
+// the comment on each says what it's compensating for. Swapping in a
+// different photograph should mostly just work — the ink/paper cutoff
+// re-derives itself — but CROP is specific to this image's borders.
 
 export interface PortraitTarget {
   x: number
@@ -17,17 +23,36 @@ export interface PortraitLayout {
   height: number
 }
 
-const PORTRAIT_SRC = `${import.meta.env.BASE_URL}gurudev.png`
+const PORTRAIT_SRC = `${import.meta.env.BASE_URL}gurudev.jpg`
 
 // Cap the decode resolution — the grid sampling below reads every pixel of
-// every cell once per binary-search step, and portrait detail beyond this is
-// far finer than one puff can represent anyway.
-const SAMPLE_MAX_DIM = 420
+// every cell once per binary-search step. Set above the source's own size so
+// a small image is sampled at native resolution: downscaling first would
+// throw away exactly the fine linework (eyes, smile, mala beads) that makes
+// the portrait recognisable.
+const SAMPLE_MAX_DIM = 640
 
-// Mean cell luminance (0-255) below which a cell counts as part of the
-// drawing rather than background. The source is a high-contrast charcoal
-// drawing, so this sits well clear of both the paper and the ink.
-const INK_THRESHOLD = 150
+// The source is a photograph of a drawing and carries a solid black band
+// about 15px deep across the top, which would otherwise be read as ink and
+// assembled as a bar above Gurudev's head. Measured from the image: the
+// other three edges are clean paper, and the hair runs right up to the left
+// edge, so cropping that side would eat into the drawing. Fractions rather
+// than pixels so they survive the photo being re-shot at another size.
+const CROP = { left: 0, right: 0, top: 0.028, bottom: 0 }
+
+// Pins the ink/paper cutoff if the automatic choice below ever picks badly.
+// Null means "use Otsu", which is the intended path.
+const INK_THRESHOLD_OVERRIDE: number | null = null
+
+// Fraction of a cell that must be ink for it to join the drawing (see
+// inkCells). Low enough that a single-pixel facial line still qualifies,
+// high enough to ignore stray JPEG speckle around the charcoal.
+const INK_COVERAGE = 0.2
+
+// How much sparsely-covered cells are lightened relative to solid ones (see
+// inkCells). 1 renders every ink cell flat black; higher preserves more of
+// the drawing's tonal range.
+const INK_CONTRAST = 2.2
 
 const MIN_COLS = 8
 const MAX_COLS = 640
@@ -36,6 +61,57 @@ interface Sample {
   data: Uint8ClampedArray
   width: number
   height: number
+  /** Luminance cutoff separating ink from paper, derived once at preload. */
+  inkThreshold: number
+}
+
+function luminance(r: number, g: number, b: number): number {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/**
+ * Otsu's method: the luminance cutoff that maximises between-class variance,
+ * i.e. the value that best separates the image's two populations. A photo of
+ * a drawing has uneven paper tone and compression ringing around the
+ * charcoal, so a hardcoded cutoff is a guess that either swallows the light
+ * face or drops the softer hair — this re-derives itself per image.
+ */
+function otsuThreshold(data: Uint8ClampedArray): number {
+  const histogram = new Array<number>(256).fill(0)
+  let total = 0
+  for (let i = 0; i < data.length; i += 4) {
+    histogram[Math.round(luminance(data[i], data[i + 1], data[i + 2]))]++
+    total++
+  }
+  if (total === 0) return 128
+
+  let sum = 0
+  for (let v = 0; v < 256; v++) sum += v * histogram[v]
+
+  let sumBackground = 0
+  let weightBackground = 0
+  let best = 128
+  let bestVariance = -1
+
+  for (let v = 0; v < 256; v++) {
+    weightBackground += histogram[v]
+    if (weightBackground === 0) continue
+    const weightForeground = total - weightBackground
+    if (weightForeground === 0) break
+
+    sumBackground += v * histogram[v]
+    const meanBackground = sumBackground / weightBackground
+    const meanForeground = (sum - sumBackground) / weightForeground
+    const delta = meanBackground - meanForeground
+    const variance = weightBackground * weightForeground * delta * delta
+
+    if (variance > bestVariance) {
+      bestVariance = variance
+      best = v
+    }
+  }
+
+  return best
 }
 
 let cachedSample: Sample | null = null
@@ -66,9 +142,15 @@ export function preloadPortrait(): Promise<Sample> {
   if (pendingLoad) return pendingLoad
 
   pendingLoad = loadImage(PORTRAIT_SRC).then((img) => {
-    const scale = Math.min(1, SAMPLE_MAX_DIM / Math.max(img.width, img.height))
-    const width = Math.max(1, Math.round(img.width * scale))
-    const height = Math.max(1, Math.round(img.height * scale))
+    // Source rectangle: the artwork with the photo's dark edge bands trimmed.
+    const sx = img.width * CROP.left
+    const sy = img.height * CROP.top
+    const sw = Math.max(1, img.width * (1 - CROP.left - CROP.right))
+    const sh = Math.max(1, img.height * (1 - CROP.top - CROP.bottom))
+
+    const scale = Math.min(1, SAMPLE_MAX_DIM / Math.max(sw, sh))
+    const width = Math.max(1, Math.round(sw * scale))
+    const height = Math.max(1, Math.round(sh * scale))
 
     const canvas = document.createElement('canvas')
     canvas.width = width
@@ -78,9 +160,15 @@ export function preloadPortrait(): Promise<Sample> {
     // untouched transparent pixels would otherwise read as pure black ink.
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, width, height)
-    ctx.drawImage(img, 0, 0, width, height)
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, width, height)
 
-    cachedSample = { data: ctx.getImageData(0, 0, width, height).data, width, height }
+    const data = ctx.getImageData(0, 0, width, height).data
+    cachedSample = {
+      data,
+      width,
+      height,
+      inkThreshold: INK_THRESHOLD_OVERRIDE ?? otsuThreshold(data),
+    }
     pendingLoad = null
     return cachedSample
   })
@@ -98,8 +186,15 @@ interface Cell {
   tint: number
 }
 
-// Averages each grid cell and keeps the ones dark enough to be part of the
-// drawing. Returns them in row-major order.
+// Decides which grid cells are part of the drawing, and what colour each
+// one's puff should be. Returns them in row-major order.
+//
+// Cells are judged by how MUCH of them is ink, not by their average colour.
+// One puff has to stand in for several source pixels, and a cell holding a
+// single-pixel line — an eye, the smile, the edge of the nose — averages out
+// well above the paper cutoff and would be discarded, while solid masses of
+// hair survive. Averaging therefore erases exactly the features that make the
+// face readable and keeps only the blocks. Judging by coverage keeps them.
 function inkCells(sample: Sample, cols: number): { cells: Cell[]; rows: number } {
   const rows = Math.max(1, Math.round((cols * sample.height) / sample.width))
   const cellW = sample.width / cols
@@ -113,31 +208,46 @@ function inkCells(sample: Sample, cols: number): { cells: Cell[]; rows: number }
       const x0 = Math.floor(col * cellW)
       const x1 = Math.max(x0 + 1, Math.floor((col + 1) * cellW))
 
+      // Accumulate the ink pixels only, so the tint reflects the colour of
+      // the mark rather than the colour of the mark averaged with the paper
+      // around it (which would render a thin line as an invisible pale puff).
       let r = 0
       let g = 0
       let b = 0
+      let ink = 0
       let n = 0
       for (let y = y0; y < y1 && y < sample.height; y++) {
         for (let x = x0; x < x1 && x < sample.width; x++) {
           const i = (y * sample.width + x) * 4
+          n++
+          if (luminance(sample.data[i], sample.data[i + 1], sample.data[i + 2]) >= sample.inkThreshold) {
+            continue
+          }
           r += sample.data[i]
           g += sample.data[i + 1]
           b += sample.data[i + 2]
-          n++
+          ink++
         }
       }
-      if (n === 0) continue
+      if (n === 0 || ink / n < INK_COVERAGE) continue
 
-      r /= n
-      g /= n
-      b /= n
-      const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-      if (luminance >= INK_THRESHOLD) continue
+      r /= ink
+      g /= ink
+      b /= ink
+
+      // Deepen toward black by how completely the cell is covered: a solid
+      // block of beard reads darker than a cell a single hair passes
+      // through, which preserves the drawing's tone. Without this every ink
+      // cell would come out the same flat black.
+      const deepen = Math.pow(ink / n, 1 / INK_CONTRAST)
 
       cells.push({
         col,
         row,
-        tint: (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b),
+        tint:
+          (Math.round(r * deepen) << 16) |
+          (Math.round(g * deepen) << 8) |
+          Math.round(b * deepen),
       })
     }
   }
