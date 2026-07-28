@@ -136,11 +136,19 @@ const GATHER_MAX_ZOOM = 0.3
 // swoosh up to the front of the screen, big enough to read from across a
 // room, then drift away again. Ambient — it needs no interaction, and runs on
 // the projector and on phones alike.
-const SPOTLIGHT_IN_S = 1.25
-const SPOTLIGHT_HOLD_S = 4.5
-const SPOTLIGHT_OUT_S = 0.9
-const SPOTLIGHT_GAP_S = 2.2
-const SPOTLIGHT_FIRST_DELAY_MS = 2500
+const SPOTLIGHT_IN_S = 0.85
+const SPOTLIGHT_OUT_S = 0.6
+const SPOTLIGHT_GAP_S = 0.45
+const SPOTLIGHT_FIRST_DELAY_MS = 1800
+// How long a message sits still, scaled to how much there is to read — a
+// six-word thank-you does not need the same time on screen as a full
+// paragraph, and giving every message the slowest message's dwell is what
+// made the rotation drag. Clamped at both ends so nothing flashes past and
+// nothing outstays its welcome.
+const SPOTLIGHT_HOLD_BASE_S = 0.9
+const SPOTLIGHT_HOLD_PER_WORD_S = 0.24
+const SPOTLIGHT_HOLD_MIN_S = 1.8
+const SPOTLIGHT_HOLD_MAX_S = 4.2
 // Size is bounded by both screen dimensions rather than just the shorter one:
 // on a tall phone the shorter side alone gives a puff too small to hold a
 // 200-character message, and the text spills out of it.
@@ -685,7 +693,25 @@ export default function CloudCanvas({
       return picks
     }
 
-    function buildSpotlight(message: Message, index: number, total: number) {
+    /**
+     * Dwell time for a batch, driven by its wordiest message so a pair leaves
+     * together rather than one blinking out while its neighbour is still
+     * being read.
+     */
+    function spotlightHold(messages: Message[]): number {
+      const words = Math.max(
+        ...messages.map((m) => m.text.trim().split(/\s+/).filter(Boolean).length),
+      )
+      return Math.min(
+        SPOTLIGHT_HOLD_MAX_S,
+        Math.max(
+          SPOTLIGHT_HOLD_MIN_S,
+          SPOTLIGHT_HOLD_BASE_S + words * SPOTLIGHT_HOLD_PER_WORD_S,
+        ),
+      )
+    }
+
+    function buildSpotlight(message: Message, index: number, total: number, holdS: number) {
       const layer = spotlightLayerRef.current
       const viewport = viewportRef.current
       const currentApp = appRef.current
@@ -777,7 +803,7 @@ export default function CloudCanvas({
         })
         .to(group, { alpha: 1, duration: SPOTLIGHT_IN_S * 0.55, ease: 'power1.out' }, 0)
         .to(group.scale, { x: 1, y: 1, duration: SPOTLIGHT_IN_S, ease: 'back.out(1.2)' }, 0)
-        .to(group, { duration: SPOTLIGHT_HOLD_S })
+        .to(group, { duration: holdS })
         .to(group, {
           alpha: 0,
           y: targetY - screenH * 0.09,
@@ -830,7 +856,8 @@ export default function CloudCanvas({
         scheduleSpotlight(SPOTLIGHT_GAP_S * 1000)
         return
       }
-      picks.forEach((message, i) => buildSpotlight(message, i, picks.length))
+      const hold = spotlightHold(picks)
+      picks.forEach((message, i) => buildSpotlight(message, i, picks.length, hold))
       // The next batch is scheduled when this one finishes clearing, not here.
     }
 
