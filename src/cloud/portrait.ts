@@ -35,6 +35,15 @@ interface PortraitSource {
    */
   mode: 'ink' | 'photo'
   crop: { left: number; right: number; top: number; bottom: number }
+  /**
+   * How far the screen darkens behind this picture, 0-1.
+   *
+   * Per-picture because the two want opposite backdrops. The photo needs a
+   * dark one or its colours go chalky and the white robe disappears; the
+   * drawing is dark ink and was designed to read against the pale sky, so
+   * darkening behind it very nearly erases it.
+   */
+  dim: number
 }
 
 export const PORTRAITS: Record<PortraitId, PortraitSource> = {
@@ -47,6 +56,7 @@ export const PORTRAITS: Record<PortraitId, PortraitSource> = {
     // the other three edges are clean paper, and the hair runs right up to
     // the left edge, so cropping that side would eat into the drawing.
     crop: { left: 0, right: 0, top: 0.028, bottom: 0 },
+    dim: 0,
   },
   photo: {
     // Background-removed during asset prep, and the Art of Living logo band
@@ -60,10 +70,16 @@ export const PORTRAITS: Record<PortraitId, PortraitSource> = {
     // 16:9 screen than a tall narrow portrait constrained by height. A little
     // shoulder is kept so it doesn't read as a floating head.
     crop: { left: 0, right: 0, top: 0, bottom: 0.18 },
+    dim: 0.9,
   },
 }
 
 export const DEFAULT_PORTRAIT: PortraitId = 'drawing'
+
+/** How far the screen darkens behind a given picture. */
+export function portraitDim(id: PortraitId): number {
+  return PORTRAITS[id]?.dim ?? 0
+}
 
 // Cap the decode resolution — the grid sampling below reads every pixel of
 // every cell once per binary-search step. Set above the source's own size so

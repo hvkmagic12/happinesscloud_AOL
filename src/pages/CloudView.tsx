@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom'
 import { useLiveMessages } from '../lib/useLiveMessages'
 import { useCloudCommands } from '../lib/useCloudCommands'
 import { useMessageCategories } from '../lib/useMessageCategories'
+import { portraitDim } from '../cloud/portrait'
 import type { CategoryId } from '../lib/categories'
 import CloudCanvas from '../cloud/CloudCanvas'
 import CategoryLegend from '../components/CategoryLegend'
@@ -24,7 +25,9 @@ export default function CloudView() {
   const [activeCategory, setActiveCategory] = useState<CategoryId | null>(null)
 
   return (
-    <div className={`cloud-view ${assembled ? 'is-assembled' : ''}`}>
+    // Chrome flips to light-on-dark only when the canvas actually darkens,
+    // which depends on which picture is up — see portraitDim.
+    <div className={`cloud-view ${assembled && portraitDim(portrait) > 0 ? 'is-dimmed' : ''}`}>
       {state === 'ready' && (
         <span className="cloud-counter">{messages.length} messages shared</span>
       )}

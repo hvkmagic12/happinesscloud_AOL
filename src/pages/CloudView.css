@@ -43,8 +43,8 @@
   transition: background 3.2s ease, color 3.2s ease;
 }
 
-.cloud-view.is-assembled .cloud-counter,
-.cloud-view.is-assembled .cloud-back-link {
+.cloud-view.is-dimmed .cloud-counter,
+.cloud-view.is-dimmed .cloud-back-link {
   background: rgba(255, 255, 255, 0.14);
   color: #e8e4f2;
 }

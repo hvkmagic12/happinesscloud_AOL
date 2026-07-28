@@ -46,12 +46,12 @@
   transition: color 3.2s ease, text-shadow 3.2s ease;
 }
 
-.is-assembled .event-heading-title {
+.is-dimmed .event-heading-title {
   color: #f4f1fa;
   text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55);
 }
 
-.is-assembled .event-heading-place {
+.is-dimmed .event-heading-place {
   color: #c9c2dc;
   text-shadow: 0 2px 14px rgba(0, 0, 0, 0.5);
 }

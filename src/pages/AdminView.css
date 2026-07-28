@@ -93,20 +93,20 @@
   transition: background 3.2s ease, color 3.2s ease;
 }
 
-.admin-view.is-assembled .admin-counter {
+.admin-view.is-dimmed .admin-counter {
   background: rgba(255, 255, 255, 0.14);
   color: #e8e4f2;
 }
 
-.admin-view.is-assembled .portrait-picker {
+.admin-view.is-dimmed .portrait-picker {
   background: rgba(255, 255, 255, 0.14);
 }
 
-.admin-view.is-assembled .portrait-picker button {
+.admin-view.is-dimmed .portrait-picker button {
   color: #d9d4e8;
 }
 
-.admin-view.is-assembled .portrait-picker button.is-selected {
+.admin-view.is-dimmed .portrait-picker button.is-selected {
   background: rgba(255, 255, 255, 0.9);
   color: #3a3450;
 }

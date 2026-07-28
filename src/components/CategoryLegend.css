@@ -19,22 +19,22 @@
   transition: background 3.2s ease, color 3.2s ease;
 }
 
-.is-assembled .category-legend {
+.is-dimmed .category-legend {
   background: rgba(38, 32, 58, 0.72);
   color: #ddd8ea;
 }
 
-.is-assembled .category-legend-title,
-.is-assembled .category-legend-count {
+.is-dimmed .category-legend-title,
+.is-dimmed .category-legend-count {
   color: #b3abc8;
 }
 
-.is-assembled .category-legend-row:hover,
-.is-assembled .category-legend-row.is-active {
+.is-dimmed .category-legend-row:hover,
+.is-dimmed .category-legend-row.is-active {
   background: rgba(255, 255, 255, 0.12);
 }
 
-.is-assembled .category-legend-clear {
+.is-dimmed .category-legend-clear {
   background: rgba(255, 255, 255, 0.1);
   color: #c4bdd8;
 }

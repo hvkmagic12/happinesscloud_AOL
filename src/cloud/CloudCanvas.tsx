@@ -22,6 +22,7 @@ import {
   buildPortraitLayout,
   DEFAULT_PORTRAIT,
   isPortraitReady,
+  portraitDim,
   PORTRAITS,
   preloadPortrait,
 } from './portrait'
@@ -102,14 +103,9 @@ const PORTRAIT_CELL_SIZE = 78
 const PORTRAIT_PUFF_OVERLAP = 1.3
 // Labels would obscure the picture, so they're hidden past this progress.
 const PORTRAIT_LABEL_CUTOFF = 0.05
-// The page's sky gradient is dimmed toward this as the portrait forms.
-//
-// Not decoration. Puffs are drawn from a soft-edged texture, so each one
-// composites partly over whatever is behind it: against a pale sky a colour
-// portrait comes out chalky, and Gurudev's white robe disappears into the
-// background entirely. Darkening gives every puff something to read against.
+// The page's sky gradient is dimmed toward this as the portrait forms. How
+// far is a property of the picture, not a constant — see PortraitSource.dim.
 const PORTRAIT_DIM_COLOR = 0x191526
-const PORTRAIT_DIM_MAX = 0.9
 // Swapping pictures while already assembled scatters back to the cloud and
 // re-forms, since at progress 1 new targets would simply teleport.
 const PORTRAIT_SWAP_OUT_S = 1.1
@@ -135,6 +131,36 @@ const GATHER_SWAP_OUT_S = 0.9
 // cloud's size on screen reflects how big the theme actually is: the biggest
 // fills the view, the smallest sits as a small cloud in the middle of it.
 const GATHER_MAX_ZOOM = 0.3
+
+// "Spotlight": every so often one or two messages lift out of the cloud and
+// swoosh up to the front of the screen, big enough to read from across a
+// room, then drift away again. Ambient — it needs no interaction, and runs on
+// the projector and on phones alike.
+const SPOTLIGHT_IN_S = 1.25
+const SPOTLIGHT_HOLD_S = 4.5
+const SPOTLIGHT_OUT_S = 0.9
+const SPOTLIGHT_GAP_S = 2.2
+const SPOTLIGHT_FIRST_DELAY_MS = 2500
+// Size is bounded by both screen dimensions rather than just the shorter one:
+// on a tall phone the shorter side alone gives a puff too small to hold a
+// 200-character message, and the text spills out of it.
+const SPOTLIGHT_SINGLE_W = 0.8
+const SPOTLIGHT_SINGLE_H = 0.5
+const SPOTLIGHT_PAIR_W = 0.42
+const SPOTLIGHT_PAIR_H = 0.44
+// Below this width there isn't room for two side by side, so phones show one
+// at a time.
+const SPOTLIGHT_PAIR_MIN_WIDTH = 700
+// How many recently-shown messages to avoid repeating. With a big cloud this
+// barely matters; early in an event, when only a handful have been sent, it's
+// what stops the same one appearing over and over.
+const SPOTLIGHT_RECENT_MEMORY = 24
+const SPOTLIGHT_FONT_MAX = 34
+const SPOTLIGHT_FONT_MIN = 12
+// Fractions of the puff's diameter the text may occupy. Wider than the small
+// in-cloud labels because a spotlight puff is big enough to hold real lines.
+const SPOTLIGHT_WIDTH_FRACTION = 0.64
+const SPOTLIGHT_HEIGHT_FRACTION = 0.62
 
 interface PuffMotion {
   baseX: number
@@ -276,6 +302,53 @@ function fitLabel(rawText: string, radius: number): { text: string; style: TextS
   return { text, style }
 }
 
+function spotlightStyle(fontSize: number, wordWrapWidth: number): TextStyle {
+  return new TextStyle({
+    fontFamily: 'system-ui, sans-serif',
+    fontSize,
+    fontWeight: '600',
+    fill: '#ffffff',
+    stroke: { color: '#332c4a', width: Math.max(2, Math.round(fontSize * 0.16)) },
+    align: 'center',
+    wordWrap: true,
+    wordWrapWidth,
+    lineHeight: Math.round(fontSize * 1.28),
+  })
+}
+
+// Same measure-and-shrink idea as fitLabel, but a spotlight never truncates:
+// it's the one place a message is meant to be read in full, so only the font
+// gives way.
+function fitSpotlightLabel(
+  text: string,
+  radius: number,
+): { style: TextStyle; fontSize: number } {
+  const wordWrapWidth = radius * 2 * SPOTLIGHT_WIDTH_FRACTION
+  const maxHeight = radius * 2 * SPOTLIGHT_HEIGHT_FRACTION
+
+  let fontSize = SPOTLIGHT_FONT_MAX
+  let style = spotlightStyle(fontSize, wordWrapWidth)
+  while (
+    fontSize > SPOTLIGHT_FONT_MIN &&
+    CanvasTextMetrics.measureText(text, style).height > maxHeight
+  ) {
+    fontSize -= 1
+    style = spotlightStyle(fontSize, wordWrapWidth)
+  }
+  return { style, fontSize }
+}
+
+function attributionStyle(fontSize: number): TextStyle {
+  return new TextStyle({
+    fontFamily: 'system-ui, sans-serif',
+    fontSize,
+    fontStyle: 'italic',
+    fill: '#ffffff',
+    stroke: { color: '#332c4a', width: Math.max(2, Math.round(fontSize * 0.18)) },
+    align: 'center',
+  })
+}
+
 export interface CloudCanvasProps {
   messages: Message[]
   justSubmittedId?: string | null
@@ -354,6 +427,12 @@ export default function CloudCanvas({
   // prop can change while the old one is still on screen.
   const assignedPortraitRef = useRef<PortraitId | null>(null)
   const dimSpriteRef = useRef<Sprite | null>(null)
+  // Spotlight lives on the stage, not in the viewport, so it sits at a fixed
+  // place on screen instead of panning and zooming with the cloud.
+  const spotlightLayerRef = useRef<Container | null>(null)
+  const spotlightTimerRef = useRef<number | null>(null)
+  const activeSpotlightsRef = useRef<Array<{ group: Container; timeline: gsap.core.Timeline }>>([])
+  const recentSpotlightsRef = useRef<string[]>([])
   const applyCategoryFilterRef = useRef<() => void>(() => {})
   const runGatherRef = useRef<(category: CategoryId | null) => void>(() => {})
   const categoryByIdRef = useRef(categoryById)
@@ -548,6 +627,212 @@ export default function CloudCanvas({
       }
     }
     applyCategoryFilterRef.current = applyCategoryFilter
+
+    function clearSpotlights() {
+      if (activeSpotlightsRef.current.length === 0) return
+      for (const { group, timeline } of activeSpotlightsRef.current) {
+        timeline.kill()
+        group.destroy({ children: true })
+      }
+      activeSpotlightsRef.current = []
+      // Killing the timelines skips the completion callbacks that would
+      // otherwise have queued the next batch, so requeue it here or the
+      // spotlight stops for good once the portrait has interrupted it.
+      scheduleSpotlight(SPOTLIGHT_GAP_S * 1000)
+    }
+
+    /**
+     * The messages a spotlight may draw from: the isolated theme if one is
+     * selected, otherwise the whole cloud. Falls back to the whole cloud
+     * rather than showing nothing if the selected theme is somehow empty.
+     */
+    function spotlightPool(): Message[] {
+      const all = messagesRef.current
+      const active = activeCategoryRef.current
+      const byId = categoryByIdRef.current
+      if (!active || !byId) return all
+      const filtered = all.filter((m) => byId.get(m.id) === active)
+      return filtered.length > 0 ? filtered : all
+    }
+
+    function pickSpotlights(count: number): Message[] {
+      const pool = spotlightPool()
+      if (pool.length === 0) return []
+
+      // Prefer messages not shown recently, but fall back to the whole pool
+      // so a small cloud still shows something rather than stalling.
+      const recent = new Set(recentSpotlightsRef.current)
+      const fresh = pool.filter((m) => !recent.has(m.id))
+      const source = fresh.length >= count ? fresh : pool
+
+      const picks: Message[] = []
+      const used = new Set<string>()
+      for (let i = 0; i < count && used.size < source.length; i++) {
+        let pick: Message | undefined
+        for (let attempt = 0; attempt < 24 && !pick; attempt++) {
+          const candidate = source[Math.floor(Math.random() * source.length)]
+          if (!used.has(candidate.id)) pick = candidate
+        }
+        if (!pick) break
+        used.add(pick.id)
+        picks.push(pick)
+      }
+
+      recentSpotlightsRef.current.push(...picks.map((m) => m.id))
+      while (recentSpotlightsRef.current.length > SPOTLIGHT_RECENT_MEMORY) {
+        recentSpotlightsRef.current.shift()
+      }
+      return picks
+    }
+
+    function buildSpotlight(message: Message, index: number, total: number) {
+      const layer = spotlightLayerRef.current
+      const viewport = viewportRef.current
+      const currentApp = appRef.current
+      if (!layer || !viewport || !currentApp) return
+
+      const screenW = currentApp.screen.width
+      const screenH = currentApp.screen.height
+      const diameter =
+        total > 1
+          ? Math.min(screenW * SPOTLIGHT_PAIR_W, screenH * SPOTLIGHT_PAIR_H)
+          : Math.min(screenW * SPOTLIGHT_SINGLE_W, screenH * SPOTLIGHT_SINGLE_H)
+      const radius = diameter / 2
+
+      const category = categoryByIdRef.current?.get(message.id) ?? FALLBACK_CATEGORY
+      const group = new Container()
+
+      const sprite = new Sprite(getPuffTexture(currentApp.renderer))
+      sprite.anchor.set(0.5)
+      sprite.tint = puffTint(message.hue_offset, category)
+      sprite.width = diameter
+      sprite.height = diameter
+      group.addChild(sprite)
+
+      const fitted = fitSpotlightLabel(message.text, radius)
+      const label = new Text({ text: message.text, style: fitted.style })
+      label.anchor.set(0.5)
+      group.addChild(label)
+
+      // Names are optional on the form, so most messages have none.
+      const who = [message.name, message.state].filter(Boolean).join(', ')
+      if (who) {
+        const attribution = new Text({
+          text: `— ${who}`,
+          style: attributionStyle(Math.max(11, Math.round(fitted.fontSize * 0.72))),
+        })
+        attribution.anchor.set(0.5, 0)
+        attribution.y = label.height / 2 + radius * 0.1
+        group.addChild(attribution)
+      }
+
+      // Two share the screen; one sits in the middle.
+      const spread = total > 1 ? screenW * 0.21 : 0
+      // On wide screens the themes legend is a panel down the left, so the
+      // left-hand spotlight is held clear of it. Below the CSS breakpoint the
+      // legend is a bottom sheet instead and the whole width is free.
+      const legendClearance = screenW > 640 ? 296 : 0
+      const targetX = Math.max(
+        legendClearance + diameter / 2,
+        screenW / 2 + (index - (total - 1) / 2) * spread * 2,
+      )
+      const targetY = screenH * 0.44
+
+      // Start from where this puff actually sits on screen, so it reads as
+      // rising out of the cloud — but always from low down, so the motion is
+      // a swoosh upward however the camera happens to be positioned.
+      const puff = spritesRef.current.get(message.id)
+      let startX = targetX
+      let startY = screenH + diameter * 0.5
+      if (puff) {
+        const point = viewport.toScreen(puff.x, puff.y)
+        startX = Math.min(Math.max(point.x, screenW * 0.12), screenW * 0.88)
+        startY = Math.max(point.y, screenH * 0.86)
+      }
+
+      group.x = startX
+      group.y = startY
+      group.alpha = 0
+      group.scale.set(0.3)
+      layer.addChild(group)
+
+      const entry = { group, timeline: gsap.timeline() }
+      activeSpotlightsRef.current.push(entry)
+
+      entry.timeline
+        .to(group, {
+          duration: SPOTLIGHT_IN_S,
+          ease: 'power2.out',
+          motionPath: {
+            path: [
+              { x: startX, y: startY },
+              {
+                x: (startX + targetX) / 2 + (index % 2 === 0 ? -1 : 1) * screenW * 0.04,
+                y: (startY + targetY) / 2,
+              },
+              { x: targetX, y: targetY },
+            ],
+            curviness: 1.4,
+          },
+        })
+        .to(group, { alpha: 1, duration: SPOTLIGHT_IN_S * 0.55, ease: 'power1.out' }, 0)
+        .to(group.scale, { x: 1, y: 1, duration: SPOTLIGHT_IN_S, ease: 'back.out(1.2)' }, 0)
+        .to(group, { duration: SPOTLIGHT_HOLD_S })
+        .to(group, {
+          alpha: 0,
+          y: targetY - screenH * 0.09,
+          duration: SPOTLIGHT_OUT_S,
+          ease: 'power1.in',
+        })
+        .to(
+          group.scale,
+          { x: 1.12, y: 1.12, duration: SPOTLIGHT_OUT_S, ease: 'power1.in' },
+          '<',
+        )
+        .call(() => {
+          activeSpotlightsRef.current = activeSpotlightsRef.current.filter(
+            (item) => item !== entry,
+          )
+          group.destroy({ children: true })
+          // Chained from actual completion rather than a fixed cycle length.
+          // A timer sized to the animation is only just long enough, so on a
+          // slow device the next pair arrives before the last has cleared and
+          // they stack up unreadably on top of each other.
+          if (activeSpotlightsRef.current.length === 0) {
+            scheduleSpotlight(SPOTLIGHT_GAP_S * 1000)
+          }
+        })
+    }
+
+    function scheduleSpotlight(delayMs: number) {
+      if (spotlightTimerRef.current !== null) {
+        window.clearTimeout(spotlightTimerRef.current)
+      }
+      spotlightTimerRef.current = window.setTimeout(runSpotlight, delayMs)
+    }
+
+    function runSpotlight() {
+      spotlightTimerRef.current = null
+      if (disposed || !readyRef.current) return
+
+      // Nothing lifts out while the portrait is up — a spotlight would sit
+      // squarely on top of the picture the whole room is looking at.
+      if (assembleProgressRef.current.value > PORTRAIT_LABEL_CUTOFF) {
+        scheduleSpotlight(SPOTLIGHT_GAP_S * 1000)
+        return
+      }
+
+      const currentApp = appRef.current
+      const roomForTwo =
+        currentApp !== null && currentApp.screen.width >= SPOTLIGHT_PAIR_MIN_WIDTH
+      const picks = pickSpotlights(roomForTwo && Math.random() < 0.5 ? 2 : 1)
+      if (picks.length === 0) {
+        scheduleSpotlight(SPOTLIGHT_GAP_S * 1000)
+        return
+      }
+      picks.forEach((message, i) => buildSpotlight(message, i, picks.length))
+      // The next batch is scheduled when this one finishes clearing, not here.
+    }
 
     function contentCentre() {
       const motions = puffMotionRef.current
@@ -1105,12 +1390,20 @@ export default function CloudCanvas({
         }
         runGatherRef.current = runGather
 
+        // Above the viewport, so spotlit messages sit in front of the cloud
+        // and stay put while it pans underneath them.
+        const spotlightLayer = new Container()
+        app.stage.addChild(spotlightLayer)
+        spotlightLayerRef.current = spotlightLayer
+
         readyRef.current = true
         syncPuffs()
         frameBounds(contentFitBounds(), null)
 
         // An assemble command can land before Pixi finishes initialising.
         if (assembledRef.current) runAssemble(true)
+
+        scheduleSpotlight(SPOTLIGHT_FIRST_DELAY_MS)
 
         // Gentle idle sway/rotation for every settled puff, blended toward
         // that puff's pixel slot in the portrait as assemble progress rises.
@@ -1159,7 +1452,15 @@ export default function CloudCanvas({
             // ...and the sky darkens behind it, so the picture has something
             // to read against.
             const dimSprite = dimSpriteRef.current
-            if (dimSprite) dimSprite.alpha = progress * PORTRAIT_DIM_MAX
+            if (dimSprite) {
+              // The assigned picture, not the requested one: during a swap the
+              // old picture is still on screen until the timeline reaches the
+              // bottom and reassigns.
+              const shown = assignedPortraitRef.current
+              dimSprite.alpha = progress * (shown ? portraitDim(shown) : 0)
+            }
+            // Anything already in the air would land on top of the picture.
+            if (progress > PORTRAIT_LABEL_CUTOFF) clearSpotlights()
             const shadowsLayer = shadowsLayerRef.current
             if (shadowsLayer) shadowsLayer.visible = showShadows
           }
@@ -1290,6 +1591,13 @@ export default function CloudCanvas({
       disposed = true
       resizeObserver.disconnect()
       readyRef.current = false
+      if (spotlightTimerRef.current !== null) {
+        window.clearTimeout(spotlightTimerRef.current)
+        spotlightTimerRef.current = null
+      }
+      for (const { timeline } of activeSpotlightsRef.current) timeline.kill()
+      activeSpotlightsRef.current = []
+      spotlightLayerRef.current = null
       gsap.killTweensOf(assembleProgressRef.current)
       gsap.killTweensOf(gatherProgressRef.current)
       runAssembleRef.current = () => {}

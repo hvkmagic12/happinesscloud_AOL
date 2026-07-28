@@ -3,6 +3,7 @@ import { useLiveMessages } from '../lib/useLiveMessages'
 import { useCloudCommands } from '../lib/useCloudCommands'
 import { useMessageCategories } from '../lib/useMessageCategories'
 import type { CategoryId } from '../lib/categories'
+import { portraitDim } from '../cloud/portrait'
 import CloudCanvas from '../cloud/CloudCanvas'
 import CategoryLegend from '../components/CategoryLegend'
 import EventHeading from '../components/EventHeading'
@@ -15,7 +16,9 @@ export default function AdminView() {
   const [activeCategory, setActiveCategory] = useState<CategoryId | null>(null)
 
   return (
-    <div className={`admin-view ${assembled ? 'is-assembled' : ''}`}>
+    // Chrome flips to light-on-dark only when the canvas actually darkens,
+    // which depends on which picture is up — see portraitDim.
+    <div className={`admin-view ${assembled && portraitDim(portrait) > 0 ? 'is-dimmed' : ''}`}>
       {state === 'ready' && (
         <span className="admin-counter">{messages.length} messages shared</span>
       )}
