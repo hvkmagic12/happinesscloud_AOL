@@ -207,6 +207,18 @@ interface PuffMotion {
   gatherY: number
 }
 
+// Phones report device pixel ratios of 3 and up, which at this puff count
+// means shading nine times the pixels of a 1x screen — the single biggest
+// cost on a handset, and for soft-edged pastel blobs the difference above 2x
+// is not visible. Desktops and projectors are 1x or 2x, so this is a no-op
+// for them.
+const MAX_RENDER_RESOLUTION = 2
+
+function renderResolution(): number {
+  const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1
+  return Math.min(dpr, MAX_RENDER_RESOLUTION)
+}
+
 function randomBetween(min: number, max: number): number {
   return min + Math.random() * (max - min)
 }
@@ -1109,7 +1121,7 @@ export default function CloudCanvas({
         resizeTo: container,
         backgroundAlpha: 0,
         antialias: true,
-        resolution: window.devicePixelRatio || 1,
+        resolution: renderResolution(),
         autoDensity: true,
         preference: 'webgl',
       })
@@ -1672,5 +1684,18 @@ export default function CloudCanvas({
     runGatherRef.current(activeCategory)
   }, [activeCategory])
 
-  return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        width: '100%',
+        height: '100%',
+        // Hand every touch gesture to pixi-viewport. Without this the browser
+        // also claims drags and pinches for its own scroll and page zoom, so a
+        // one-finger pan fights the page and a pinch zooms the chrome instead
+        // of the cloud.
+        touchAction: 'none',
+      }}
+    />
+  )
 }

@@ -29,9 +29,14 @@
   color: #b3abc8;
 }
 
-.is-dimmed .category-legend-row:hover,
 .is-dimmed .category-legend-row.is-active {
   background: rgba(255, 255, 255, 0.12);
+}
+
+@media (hover: hover) {
+  .is-dimmed .category-legend-row:hover {
+    background: rgba(255, 255, 255, 0.12);
+  }
 }
 
 .is-dimmed .category-legend-clear {
@@ -93,8 +98,10 @@
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 
-.category-legend-row:hover {
-  background: rgba(255, 255, 255, 0.85);
+@media (hover: hover) {
+  .category-legend-row:hover {
+    background: rgba(255, 255, 255, 0.85);
+  }
 }
 
 .category-legend-row.is-active {
@@ -158,8 +165,28 @@
   cursor: default;
 }
 
-.category-legend-clear:not(:disabled):hover {
-  background: rgba(120, 105, 150, 0.18);
+@media (hover: hover) {
+  .category-legend-clear:not(:disabled):hover {
+    background: rgba(120, 105, 150, 0.18);
+  }
+}
+
+/* Fingertip-sized controls. The header and the clear button were 38px and
+   32px tall — both under the ~44px that can be hit without aiming, and the
+   header is the one control a phone user taps most, since the panel starts
+   folded away. */
+@media (pointer: coarse) {
+  .category-legend-header {
+    padding: 13px 14px;
+  }
+
+  .category-legend-row {
+    padding: 8px 8px 9px;
+  }
+
+  .category-legend-clear {
+    padding: 13px 10px;
+  }
 }
 
 @media (max-width: 640px) {

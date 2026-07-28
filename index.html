@@ -3,7 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets the layout reach under a notch/home indicator,
+         which the env(safe-area-inset-*) padding in the stylesheets then pads
+         back out. No maximum-scale: pinch-zoom stays available for anyone who
+         needs it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Happiness Cloud</title>
     <!-- Cormorant Garamond for the event heading. Preconnect so it lands
          quickly; the stack in EventHeading.css falls back to a system serif

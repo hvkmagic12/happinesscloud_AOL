@@ -7,6 +7,12 @@ const MAX_LENGTH = 200
 const NAME_MAX_LENGTH = 80
 const STATE_MAX_LENGTH = 80
 
+// On a touch device, focusing a field on mount throws the keyboard up over
+// the form before the visitor has read what it's asking for. On a desktop,
+// where focus costs nothing, going straight to the field is a kindness.
+const PREFERS_TOUCH =
+  typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
+
 export default function SubmitView() {
   const navigate = useNavigate()
   const [text, setText] = useState('')
@@ -62,6 +68,9 @@ export default function SubmitView() {
               value={name}
               maxLength={NAME_MAX_LENGTH}
               onChange={(e) => setName(e.target.value)}
+              autoComplete="given-name"
+              autoCapitalize="words"
+              enterKeyHint="next"
             />
             <input
               type="text"
@@ -70,6 +79,9 @@ export default function SubmitView() {
               value={stateInput}
               maxLength={STATE_MAX_LENGTH}
               onChange={(e) => setStateInput(e.target.value)}
+              autoComplete="address-level1"
+              autoCapitalize="words"
+              enterKeyHint="next"
             />
           </div>
           <textarea
@@ -78,7 +90,9 @@ export default function SubmitView() {
             value={text}
             maxLength={MAX_LENGTH + 20}
             onChange={(e) => setText(e.target.value)}
-            autoFocus
+            autoCapitalize="sentences"
+            enterKeyHint="send"
+            autoFocus={!PREFERS_TOUCH}
           />
           <div className="submit-footer">
             <span className={`char-counter ${overLimit ? 'over' : ''}`}>

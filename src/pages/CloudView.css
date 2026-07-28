@@ -49,6 +49,31 @@
   color: #e8e4f2;
 }
 
+@media (pointer: coarse) {
+  /* A fingertip-sized target — this was 36px tall, under the ~44px that can
+     be hit reliably without aiming. */
+  .cloud-back-link {
+    padding: 13px 18px;
+  }
+}
+
+@media (max-width: 640px) {
+  .cloud-counter,
+  .cloud-back-link {
+    top: max(12px, env(safe-area-inset-top));
+  }
+
+  .cloud-counter {
+    left: 12px;
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+
+  .cloud-back-link {
+    right: 12px;
+  }
+}
+
 .cloud-state {
   position: absolute;
   inset: 0;

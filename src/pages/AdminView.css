@@ -72,10 +72,6 @@
   transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
 
-.assemble-button:hover {
-  box-shadow: 0 10px 26px rgba(244, 120, 155, 0.45);
-}
-
 .assemble-button:active {
   transform: scale(0.97);
 }
@@ -109,6 +105,52 @@
 .admin-view.is-dimmed .portrait-picker button.is-selected {
   background: rgba(255, 255, 255, 0.9);
   color: #3a3450;
+}
+
+/* Touch devices: every control gets to ~44px, the size a fingertip can hit
+   reliably. Keyed off pointer type rather than width, because a small laptop
+   window still has a mouse and doesn't need the extra bulk. */
+@media (pointer: coarse) {
+  .portrait-picker button {
+    padding: 13px 16px;
+  }
+
+  .assemble-button {
+    padding: 13px 22px;
+  }
+}
+
+/* Hover belongs to devices that have one. On touch it sticks after a tap and
+   leaves the last-pressed control looking selected. */
+@media (hover: hover) {
+  .assemble-button:hover {
+    box-shadow: 0 10px 26px rgba(244, 120, 155, 0.45);
+  }
+}
+
+@media (max-width: 640px) {
+  .admin-counter {
+    top: max(12px, env(safe-area-inset-top));
+    left: 12px;
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+
+  /* Across a phone the counter, the picker and the button won't fit on one
+     line — they were overlapping, with the message count hidden behind the
+     picker. Stacking the controls down the right keeps them clear of it. */
+  .admin-controls {
+    top: max(12px, env(safe-area-inset-top));
+    right: 12px;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  /* ...which pushes the heading below two rows of controls. */
+  .admin-view .event-heading {
+    padding-top: 116px;
+  }
 }
 
 .admin-state {
