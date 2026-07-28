@@ -1,15 +1,24 @@
-// Base puff hue is a warm pink; hue_offset (stored per-message, range ±15)
-// adds variation so puffs aren't all identical (Section 5.2). It's spread
-// wider than its stored range so the cloud reads as a varied mix of warm
-// pinks, corals, and purples rather than one narrow band.
-const BASE_HUE = 336
-const HUE_SPREAD = 4
-const SATURATION = 0.82
-const LIGHTNESS = 0.72
+import { CATEGORY_BY_ID, FALLBACK_CATEGORY } from '../lib/categories'
+import type { CategoryId } from '../lib/categories'
 
-export function puffTint(hueOffset: number): number {
-  const h = ((BASE_HUE + hueOffset * HUE_SPREAD) % 360 + 360) % 360
-  return hslToHex(h, SATURATION, LIGHTNESS)
+// Each category owns a hue (see src/lib/categories.ts); hue_offset (stored
+// per-message, range ±15) still varies puffs within their category so a group
+// reads as a family of related shades rather than one flat block of colour.
+//
+// The jitter is deliberately narrow. Categories sit as little as 22° apart on
+// the wheel, so the ±60° spread this used to apply when every puff was pink
+// would smear neighbouring categories into each other and make the grouping
+// unreadable. ±6° stays comfortably inside each category's lane.
+const HUE_JITTER = 0.4
+
+// The soft silhouette behind the puffs. Neutral now that the cloud itself is
+// multicoloured — tinting it toward any one category would bias the whole mass.
+export const CLOUD_BACKDROP_TINT = hslToHex(320, 0.42, 0.84)
+
+export function puffTint(hueOffset: number, category: CategoryId = FALLBACK_CATEGORY): number {
+  const def = CATEGORY_BY_ID[category] ?? CATEGORY_BY_ID[FALLBACK_CATEGORY]
+  const h = (((def.hue + hueOffset * HUE_JITTER) % 360) + 360) % 360
+  return hslToHex(h, def.saturation, def.lightness)
 }
 
 function hslToHex(h: number, s: number, l: number): number {

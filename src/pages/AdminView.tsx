@@ -1,12 +1,18 @@
+import { useState } from 'react'
 import { useLiveMessages } from '../lib/useLiveMessages'
 import { useCloudCommands } from '../lib/useCloudCommands'
+import { useMessageCategories } from '../lib/useMessageCategories'
+import type { CategoryId } from '../lib/categories'
 import CloudCanvas from '../cloud/CloudCanvas'
+import CategoryLegend from '../components/CategoryLegend'
 import EventHeading from '../components/EventHeading'
 import './AdminView.css'
 
 export default function AdminView() {
   const { messages, state, reload } = useLiveMessages()
   const { assembled, broadcastAssembled } = useCloudCommands()
+  const { categoryById, counts, present } = useMessageCategories(messages)
+  const [activeCategory, setActiveCategory] = useState<CategoryId | null>(null)
 
   return (
     <div className="admin-view">
@@ -47,7 +53,21 @@ export default function AdminView() {
       )}
 
       {state === 'ready' && messages.length > 0 && (
-        <CloudCanvas messages={messages} assembled={assembled} />
+        <>
+          <CloudCanvas
+            messages={messages}
+            assembled={assembled}
+            categoryById={categoryById}
+            activeCategory={activeCategory}
+          />
+          <CategoryLegend
+            present={present}
+            counts={counts}
+            total={messages.length}
+            active={activeCategory}
+            onSelect={setActiveCategory}
+          />
+        </>
       )}
     </div>
   )

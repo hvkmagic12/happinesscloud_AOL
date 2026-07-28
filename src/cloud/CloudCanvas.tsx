@@ -4,10 +4,12 @@ import { Viewport } from 'pixi-viewport'
 import gsap from 'gsap'
 import { MotionPathPlugin } from 'gsap/MotionPathPlugin'
 import type { Message } from '../types'
+import type { CategoryId } from '../lib/categories'
+import { FALLBACK_CATEGORY } from '../lib/categories'
 import { createLayoutCache } from './layout'
 import { CLOUD_LOBES, cloudBounds } from './cloudShape'
 import { getPuffTexture, PUFF_TEXTURE_SIZE } from './puffTexture'
-import { puffTint } from './color'
+import { CLOUD_BACKDROP_TINT, puffTint } from './color'
 import { buildPortraitLayout, isPortraitReady, preloadPortrait } from './portrait'
 import type { PortraitLayout } from './portrait'
 
@@ -87,9 +89,16 @@ const PORTRAIT_PUFF_OVERLAP = 1.3
 // Labels would obscure the picture, so they're hidden past this progress.
 const PORTRAIT_LABEL_CUTOFF = 0.05
 
+// Isolating one category fades the rest back rather than hiding them, so the
+// selected group is legible while the cloud keeps its overall shape and you
+// can still see how big a slice you're looking at.
+const DIMMED_ALPHA = 0.1
+
 interface PuffMotion {
   baseX: number
   baseY: number
+  /** Which theme this message was sorted into — drives tint and filtering. */
+  category: CategoryId
   phaseX: number
   phaseY: number
   phaseR: number
@@ -143,10 +152,11 @@ function lerpTint(a: number, b: number, t: number): number {
   )
 }
 
-function makePuffMotion(baseX: number, baseY: number): PuffMotion {
+function makePuffMotion(baseX: number, baseY: number, category: CategoryId): PuffMotion {
   return {
     baseX,
     baseY,
+    category,
     phaseX: randomBetween(0, Math.PI * 2),
     phaseY: randomBetween(0, Math.PI * 2),
     phaseR: randomBetween(0, Math.PI * 2),
@@ -223,6 +233,10 @@ export interface CloudCanvasProps {
   onJustSubmittedAnimationDone?: () => void
   /** When true, the cloud gathers into the Gurudev portrait. */
   assembled?: boolean
+  /** Message id -> theme, deciding each puff's colour. */
+  categoryById?: Map<string, CategoryId>
+  /** When set, only this theme's puffs stay lit; the rest fade back. */
+  activeCategory?: CategoryId | null
 }
 
 export default function CloudCanvas({
@@ -230,6 +244,8 @@ export default function CloudCanvas({
   justSubmittedId,
   onJustSubmittedAnimationDone,
   assembled = false,
+  categoryById,
+  activeCategory = null,
 }: CloudCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const appRef = useRef<Application | null>(null)
@@ -270,6 +286,11 @@ export default function CloudCanvas({
   const runAssembleRef = useRef<(next: boolean) => void>(() => {})
   const assembledRef = useRef(assembled)
   assembledRef.current = assembled
+  const applyCategoryFilterRef = useRef<() => void>(() => {})
+  const categoryByIdRef = useRef(categoryById)
+  categoryByIdRef.current = categoryById
+  const activeCategoryRef = useRef(activeCategory)
+  activeCategoryRef.current = activeCategory
 
   // Latest-value refs so the imperative Pixi setup (mounted once) never
   // closes over stale props.
@@ -331,6 +352,9 @@ export default function CloudCanvas({
         .to(sprite.scale, { x: 1, y: 1, duration: 0.22, ease: 'sine.inOut' })
         .call(() => {
           enteringIdsRef.current.delete(id)
+          // The filter skipped this puff while gsap owned its alpha, so hand
+          // it back now that the tween is done.
+          applyCategoryFilterRef.current()
           onJustSubmittedAnimationDoneRef.current?.()
         })
 
@@ -401,6 +425,55 @@ export default function CloudCanvas({
       // only has to hand them all back when labels switch off entirely.
       if (!visible) releaseAllLabels()
     }
+
+    // True when a theme is isolated and this puff isn't part of it.
+    function isDimmed(category: CategoryId, active: CategoryId | null): boolean {
+      return active !== null && category !== active
+    }
+
+    /**
+     * How opaque a puff should be under the current filter.
+     *
+     * The filter releases its hold as the portrait forms. Filtering is a
+     * private, per-viewer way to read the cloud, whereas the portrait is the
+     * one image the whole room is looking at — and it needs every pixel, so
+     * dimming most of them would leave the drawing as a sparse scatter of
+     * dots. The dimming returns as the cloud disperses.
+     */
+    function filteredAlpha(
+      category: CategoryId,
+      active: CategoryId | null,
+      progress: number,
+    ): number {
+      if (!isDimmed(category, active)) return 1
+      return lerp(DIMMED_ALPHA, 1, progress)
+    }
+
+    /**
+     * Applies the current theme filter across the whole cloud in one pass.
+     * Driven by the selection changing, never by the ticker: alpha only moves
+     * when someone clicks, and touching every sprite each frame is precisely
+     * the cost the ticker's culling exists to avoid.
+     */
+    function applyCategoryFilter() {
+      const active = activeCategoryRef.current
+      const progress = assembleProgressRef.current.value
+      const driftScale = 1 - progress
+
+      for (const [id, sprite] of spritesRef.current) {
+        // Still flying in — animateEntry owns its alpha until it lands.
+        if (enteringIdsRef.current.has(id)) continue
+        const motion = puffMotionRef.current.get(id)
+        if (!motion) continue
+
+        const alpha = filteredAlpha(motion.category, active, progress)
+        sprite.alpha = alpha
+        const shadow = shadowsRef.current.get(id)
+        if (shadow) shadow.alpha = alpha * SHADOW_ALPHA * driftScale
+        if (alpha !== 1) releaseLabel(id)
+      }
+    }
+    applyCategoryFilterRef.current = applyCategoryFilter
 
     function contentCentre() {
       const motions = puffMotionRef.current
@@ -486,7 +559,8 @@ export default function CloudCanvas({
         const slot = layoutById.get(message.id)
         if (!slot) continue
 
-        const motion = makePuffMotion(slot.x, slot.y)
+        const category = categoryByIdRef.current?.get(message.id) ?? FALLBACK_CATEGORY
+        const motion = makePuffMotion(slot.x, slot.y, category)
         puffMotionRef.current.set(message.id, motion)
         const width = slot.radius * 2 * motion.scaleX
         const height = slot.radius * 2 * motion.scaleY
@@ -498,7 +572,7 @@ export default function CloudCanvas({
         shadow.height = height
         shadow.rotation = motion.baseRotation
 
-        const tint = puffTint(message.hue_offset)
+        const tint = puffTint(message.hue_offset, category)
         const sprite = new Sprite(texture)
         sprite.anchor.set(0.5)
         sprite.tint = tint
@@ -528,12 +602,20 @@ export default function CloudCanvas({
           shadow.alpha = 0
           animateEntry(message.id, sprite, slot.x, slot.y)
         } else {
+          // A message arriving while a theme is isolated joins already faded
+          // back if it isn't part of that theme, rather than popping in lit
+          // and then dimming a frame later.
+          const alpha = filteredAlpha(
+            category,
+            activeCategoryRef.current,
+            assembleProgressRef.current.value,
+          )
           sprite.x = slot.x
           sprite.y = slot.y
-          sprite.alpha = 1
+          sprite.alpha = alpha
           shadow.x = slot.x + SHADOW_OFFSET_X
           shadow.y = slot.y + SHADOW_OFFSET_Y
-          shadow.alpha = SHADOW_ALPHA
+          shadow.alpha = alpha * SHADOW_ALPHA
         }
 
         shadowsLayer.addChild(shadow)
@@ -595,7 +677,7 @@ export default function CloudCanvas({
         for (const lobe of CLOUD_LOBES) {
           const sprite = new Sprite(texture)
           sprite.anchor.set(0.5)
-          sprite.tint = puffTint(0)
+          sprite.tint = CLOUD_BACKDROP_TINT
           sprite.alpha = 0.16
           sprite.x = lobe.cx
           sprite.y = lobe.cy
@@ -719,6 +801,10 @@ export default function CloudCanvas({
               duration: ASSEMBLE_DURATION_S,
               ease: 'power2.inOut',
               overwrite: true,
+              // The ticker only writes alpha for puffs on screen, so any that
+              // spent the flight culled would keep a stale filter alpha once
+              // it stops running. One full pass at the end settles them.
+              onComplete: applyCategoryFilter,
             })
             const centre = contentCentre()
             frameBounds(
@@ -736,6 +822,7 @@ export default function CloudCanvas({
               duration: DISPERSE_DURATION_S,
               ease: 'power2.inOut',
               overwrite: true,
+              onComplete: applyCategoryFilter,
             })
             frameBounds(contentFitBounds(), DISPERSE_DURATION_S * 1000)
           }
@@ -800,6 +887,7 @@ export default function CloudCanvas({
           const writeAppearance = progressChanged || targetsDirty
           // Labels are hidden at low zoom and while the portrait is up.
           const writeLabels = labelsVisibleRef.current
+          const activeCategory = activeCategoryRef.current
           // Everything below is limited to puffs on or near the screen. A
           // puff's position is a pure function of the clock and its own
           // constants, so one left stale off screen is simply correct again
@@ -852,9 +940,13 @@ export default function CloudCanvas({
                   lerp(motion.baseScaleX, motion.targetScale, progress),
                   lerp(motion.baseScaleY, motion.targetScale, progress),
                 )
+                // A filtered-out puff fades back up as the portrait forms.
+                sprite.alpha = filteredAlpha(motion.category, activeCategory, progress)
               }
 
-              if (writeLabels) {
+              // A faded-back puff shouldn't be labelled: the text would still
+              // be fully opaque and would clutter the theme being read.
+              if (writeLabels && !isDimmed(motion.category, activeCategory)) {
                 let label = activeLabelsRef.current.get(id)
                 if (!label && acquireBudget > 0) {
                   label = acquireLabel(id)
@@ -905,6 +997,7 @@ export default function CloudCanvas({
       readyRef.current = false
       gsap.killTweensOf(assembleProgressRef.current)
       runAssembleRef.current = () => {}
+      applyCategoryFilterRef.current = () => {}
       appRef.current?.destroy(true, { children: true })
       appRef.current = null
       viewportRef.current = null
@@ -935,6 +1028,11 @@ export default function CloudCanvas({
   useEffect(() => {
     runAssembleRef.current(assembled)
   }, [assembled])
+
+  // Fade the cloud back to whichever theme is isolated (or restore all of it).
+  useEffect(() => {
+    applyCategoryFilterRef.current()
+  }, [activeCategory])
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
 }
