@@ -55,7 +55,16 @@ export default function SubmitView() {
   return (
     <div className="submit-view">
       <div className="submit-card">
-        <h1>Share something positive from this week</h1>
+        <blockquote className="submit-quote">
+          <p className="submit-quote-text">
+            “If you think you are dull, your Guru is brilliant. If you think you are
+            brilliant, your Guru irrational. If you think you are irrational, your Guru is
+            irresistible. If you complain, your Guru gets tougher. If you are perfect, your
+            Guru is imperfection personified. Do you still want to have a Guru? It is
+            inviting all sorts of trouble!”
+          </p>
+          <footer className="submit-quote-source">— Gurudev</footer>
+        </blockquote>
         <p className="subtitle">
           Your words will float up and join everyone else's in the cloud.
         </p>
@@ -86,7 +95,7 @@ export default function SubmitView() {
           </div>
           <textarea
             className="submit-textarea"
-            placeholder="Something you're grateful for..."
+            placeholder="Share your thoughts 😉..."
             value={text}
             maxLength={MAX_LENGTH + 20}
             onChange={(e) => setText(e.target.value)}

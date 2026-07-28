@@ -30,11 +30,29 @@
   text-align: center;
 }
 
-.submit-card h1 {
-  margin: 0 0 8px;
-  font-size: 26px;
-  line-height: 1.3;
+/* A long quote, not a headline — set in the event's serif at reading size
+   rather than the old 26px bold, which at this length would have filled the
+   card and pushed the form itself below the fold on a phone. */
+.submit-quote {
+  margin: 0 0 16px;
+  padding: 0;
+}
+
+.submit-quote-text {
+  margin: 0;
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  font-size: 19px;
+  line-height: 1.42;
   color: #3a3450;
+}
+
+.submit-quote-source {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #8b849c;
 }
 
 .submit-card p.subtitle {
@@ -150,8 +168,8 @@
     border-radius: 18px;
   }
 
-  .submit-card h1 {
-    font-size: 22px;
+  .submit-quote-text {
+    font-size: 17px;
   }
 
   .submit-card p.subtitle {
