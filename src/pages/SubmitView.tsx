@@ -60,6 +60,9 @@ export default function SubmitView() {
           <p className="submit-quote-text">{GURUDEV_QUOTE}</p>
           <footer className="submit-quote-source">{GURUDEV_QUOTE_SOURCE}</footer>
         </blockquote>
+        <p className="submit-invite">
+          We invite you to share your response to the below quote by Gurudev
+        </p>
         <form onSubmit={handleSubmit}>
           <div className="submit-name-row">
             <input

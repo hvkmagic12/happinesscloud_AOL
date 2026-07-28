@@ -57,6 +57,13 @@
   color: #8b849c;
 }
 
+.submit-invite {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #6b6379;
+}
+
 .submit-name-row {
   display: flex;
   gap: 10px;

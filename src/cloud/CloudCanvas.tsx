@@ -30,6 +30,16 @@ import type { PortraitId, PortraitLayout, PortraitTarget } from './portrait'
 
 gsap.registerPlugin(MotionPathPlugin)
 
+// By default gsap clamps its time delta when a frame runs long, so a struggling
+// machine plays animations in slow motion rather than dropping frames. That is
+// wrong for this app twice over: the assemble is broadcast to every screen in
+// the room at once, and a slow projector would drift out of step with the
+// phones watching it; and tween onComplete callbacks — which is where the
+// portrait's filler puffs are cleaned up — would fire seconds late or not at
+// all. Off, gsap advances by real elapsed time and every screen stays on the
+// same schedule.
+gsap.ticker.lagSmoothing(0)
+
 // Placeholder zoom-out floor used only until the real one is computed at
 // mount time from actual screen size + puff/mask bounds (see minZoom in the
 // mount effect) — a fixed ratio can't account for every screen's size/aspect
@@ -104,13 +114,20 @@ const PORTRAIT_PUFF_OVERLAP = 1.3
 // Labels would obscure the picture, so they're hidden past this progress.
 const PORTRAIT_LABEL_CUTOFF = 0.05
 // The picture is drawn at whatever grid the available puffs can fill, so its
-// sharpness is bounded by how many messages have been sent. Early in an event
-// that isn't many: 1000 messages resolve to about 34x38 cells, which reads as
-// a smudge. Below this many puffs the cloud makes up the difference with
-// plain ones that carry no message, purely so the portrait resolves. 6000
-// lands around 84x94 — sharp enough for the face to read from the back of a
-// room, and well inside what the renderer handles comfortably.
-const PORTRAIT_MIN_CELLS = 6000
+// sharpness would otherwise depend on turnout: 1000 messages resolve to about
+// 34x38 cells, which reads as a smudge. Below this many puffs the cloud makes
+// up the difference with plain ones that carry no message, purely so the
+// portrait resolves — so the same detailed face appears whether fifty people
+// or five thousand have written in.
+//
+// 12000 lands around 119x134, which is where the eyes gain catchlights and
+// the tilak and teeth start to read; past roughly 16000 each cell is under
+// ~3 source pixels and there's no more detail in the photograph to find.
+// Affordable because filler is far cheaper than a message puff — no drift, no
+// label, no shadow, no filter state, and no per-frame work at all once the
+// transition settles — so 12000 of these is lighter than the 8000 message
+// puffs this already carries. Lower it if a venue's machine struggles.
+const PORTRAIT_MIN_CELLS = 12000
 // The page's sky gradient is dimmed toward this as the portrait forms. How
 // far is a property of the picture, not a constant — see PortraitSource.dim.
 const PORTRAIT_DIM_COLOR = 0x191526
@@ -1023,34 +1040,50 @@ export default function CloudCanvas({
       const currentApp = appRef.current
       if (!layer || !currentApp) return
 
-      destroyFillers()
-      if (spare.length === 0) return
-
       const texture = getPuffTexture(currentApp.renderer)
       const box = contentFitBounds()
       const spanX = box.maxX - box.minX
       const spanY = box.maxY - box.minY
+      const pool = fillersRef.current
+
+      // Grow or shrink the pool rather than rebuilding it. Constructing twelve
+      // thousand sprites is the one genuinely expensive moment in an assemble
+      // — it blocks the main thread — and rebuilding on every press would pay
+      // that cost in front of the whole room each time. Kept between presses,
+      // only the first assemble builds anything.
+      while (pool.length > spare.length) pool.pop()!.sprite.destroy()
+      while (pool.length < spare.length) {
+        const sprite = new Sprite(texture)
+        sprite.anchor.set(0.5)
+        layer.addChild(sprite)
+        pool.push({ sprite, startX: 0, startY: 0, targetX: 0, targetY: 0 })
+      }
 
       for (let i = 0; i < spare.length; i++) {
         const target = spare[i]
-        const sprite = new Sprite(texture)
-        sprite.anchor.set(0.5)
-        sprite.tint = target.tint
-        sprite.alpha = 0
-        const startX = box.minX + hashUnit(i * 2 + 1) * spanX
-        const startY = box.minY + hashUnit(i * 2 + 2) * spanY
-        sprite.x = startX
-        sprite.y = startY
-        sprite.scale.set(targetScale)
-        layer.addChild(sprite)
-        fillersRef.current.push({ sprite, startX, startY, targetX: target.x, targetY: target.y })
+        const filler = pool[i]
+        filler.startX = box.minX + hashUnit(i * 2 + 1) * spanX
+        filler.startY = box.minY + hashUnit(i * 2 + 2) * spanY
+        filler.targetX = target.x
+        filler.targetY = target.y
+        filler.sprite.tint = target.tint
+        filler.sprite.alpha = 0
+        filler.sprite.scale.set(targetScale)
+        filler.sprite.x = filler.startX
+        filler.sprite.y = filler.startY
       }
+
+      layer.visible = true
     }
 
-    function destroyFillers() {
-      if (fillersRef.current.length === 0) return
-      for (const filler of fillersRef.current) filler.sprite.destroy()
-      fillersRef.current = []
+    /**
+     * Stands the filler puffs down once the cloud has dispersed. They're kept
+     * allocated for the next assemble — a hidden layer costs one skipped
+     * branch per frame, whereas rebuilding costs the hitch described above.
+     */
+    function releaseFillers() {
+      const layer = fillerLayerRef.current
+      if (layer) layer.visible = false
     }
 
     /**
@@ -1461,7 +1494,7 @@ export default function CloudCanvas({
               onComplete: () => {
                 applyCategoryFilter()
                 // The picture's padding has served its purpose.
-                destroyFillers()
+                releaseFillers()
               },
             })
             frameBounds(contentFitBounds(), DISPERSE_DURATION_S * 1000)
@@ -1634,13 +1667,12 @@ export default function CloudCanvas({
               filler.sprite.y = lerp(filler.startY, filler.targetY, progress)
               filler.sprite.alpha = progress
             }
-            // Guaranteed cleanup is the disperse tween's onComplete; this only
-            // catches the case where progress is parked at rest. Deliberately
-            // a threshold rather than `=== 0`: gsap clamps its time delta when
-            // frames run long (lag smoothing), so on a slow device the value
-            // creeps toward zero over many seconds instead of landing on it,
-            // and an exact comparison simply never fires.
-            if (progress < 0.001) destroyFillers()
+            // Backstop for the disperse tween's onComplete. The !assembled
+            // guard matters: zero is also where an assemble *starts*, and
+            // without it this destroys the fillers on the very frame after
+            // they're built, leaving the portrait as just the handful of real
+            // messages.
+            if (progress === 0 && !assembledRef.current) releaseFillers()
           }
 
           const view = viewport.getVisibleBounds()
