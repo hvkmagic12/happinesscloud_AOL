@@ -26,9 +26,18 @@ export default function CategoryLegend({
 }: CategoryLegendProps) {
   // Starts open on desktop and closed on phones, where the panel would cover
   // a real share of the cloud. Matches the CSS breakpoint.
-  const [open, setOpen] = useState(
-    () => typeof window === 'undefined' || window.innerWidth > 640,
-  )
+  const isNarrow = () => typeof window !== 'undefined' && window.innerWidth <= 640
+  const [open, setOpen] = useState(() => !isNarrow())
+
+  // On a phone the panel is a bottom sheet covering nearly half the screen,
+  // so picking a theme folds it away — otherwise it hides the very cloud the
+  // tap just gathered. On desktop it sits in the corner and can stay put.
+  function select(next: CategoryId | null) {
+    onSelect(next)
+    if (next !== null && isNarrow()) setOpen(false)
+  }
+
+  const activeDef = present.find((c) => c.id === active)
 
   if (present.length === 0) return null
 
@@ -40,7 +49,11 @@ export default function CategoryLegend({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
       >
-        <span className="category-legend-title">Themes</span>
+        {/* Collapsed, the header has to say which theme is showing — the
+            panel is folded away and the cloud alone doesn't name it. */}
+        <span className="category-legend-title">
+          {!open && activeDef ? activeDef.label : 'Themes'}
+        </span>
         <span className="category-legend-chevron" aria-hidden="true">
           {open ? '▾' : '▸'}
         </span>
@@ -58,7 +71,7 @@ export default function CategoryLegend({
                   <button
                     type="button"
                     className={`category-legend-row ${isActive ? 'is-active' : ''}`}
-                    onClick={() => onSelect(isActive ? null : category.id)}
+                    onClick={() => select(isActive ? null : category.id)}
                     aria-pressed={isActive}
                     title={category.blurb}
                   >

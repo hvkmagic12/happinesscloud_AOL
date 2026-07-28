@@ -6,7 +6,7 @@ import { MotionPathPlugin } from 'gsap/MotionPathPlugin'
 import type { Message } from '../types'
 import type { CategoryId } from '../lib/categories'
 import { FALLBACK_CATEGORY } from '../lib/categories'
-import { createLayoutCache } from './layout'
+import { createLayoutCache, layoutCloudFitted } from './layout'
 import { CLOUD_LOBES, cloudBounds } from './cloudShape'
 import { getPuffTexture, PUFF_TEXTURE_SIZE } from './puffTexture'
 import { CLOUD_BACKDROP_TINT, puffTint } from './color'
@@ -94,6 +94,23 @@ const PORTRAIT_LABEL_CUTOFF = 0.05
 // can still see how big a slice you're looking at.
 const DIMMED_ALPHA = 0.1
 
+// "Gather": picking a theme pulls its puffs out of the big cloud and packs
+// them into a cloud of their own, so a theme can be read on its own terms.
+const GATHER_DURATION_S = 1.8
+const SCATTER_DURATION_S = 1.4
+// Switching straight from one theme to another runs the two back to back
+// (out, swap targets, in) rather than sliding between two packings, which
+// would send both sets of puffs across each other.
+const GATHER_SWAP_OUT_S = 0.9
+// Ceiling on how far the camera zooms in to frame a gathered theme.
+//
+// Framing every theme to fill the screen would blow a hundred-message theme
+// up until its puffs are 50px soft-edged blobs with visible gaps between
+// them — it stops reading as a cloud. Capping instead means a gathered
+// cloud's size on screen reflects how big the theme actually is: the biggest
+// fills the view, the smallest sits as a small cloud in the middle of it.
+const GATHER_MAX_ZOOM = 0.3
+
 interface PuffMotion {
   baseX: number
   baseY: number
@@ -124,6 +141,11 @@ interface PuffMotion {
   targetY: number
   targetTint: number
   targetScale: number
+  // Where this puff sits in its theme's own gathered cloud. Also defaults to
+  // its resting state, so puffs of unselected themes stay put through a
+  // gather without needing to be excluded from the loop.
+  gatherX: number
+  gatherY: number
 }
 
 function randomBetween(min: number, max: number): number {
@@ -177,6 +199,8 @@ function makePuffMotion(baseX: number, baseY: number, category: CategoryId): Puf
     targetY: baseY,
     targetTint: 0xffffff,
     targetScale: 1,
+    gatherX: baseX,
+    gatherY: baseY,
   }
 }
 
@@ -279,6 +303,15 @@ export default function CloudCanvas({
   // Single tweened value the ticker reads, rather than tweening thousands of
   // sprites individually: 0 = cloud at rest, 1 = fully assembled portrait.
   const assembleProgressRef = useRef({ value: 0 })
+  // Same one-tweened-value-the-ticker-reads trick as assemble: 0 = puffs at
+  // their slot in the big cloud, 1 = the selected theme packed into its own.
+  const gatherProgressRef = useRef({ value: 0 })
+  // Which theme the current gatherX/gatherY were built for, so a re-layout
+  // (e.g. a new message arriving) knows what to rebuild.
+  const gatheredCategoryRef = useRef<CategoryId | null>(null)
+  // Member order of the current gathered cloud, held steady across re-layouts
+  // so an arriving message appends rather than reshuffling everyone.
+  const gatheredOrderRef = useRef<string[]>([])
   const portraitLayoutRef = useRef<PortraitLayout | null>(null)
   // Forces one more ticker pass after targets change while already
   // assembled (the loop otherwise short-circuits when nothing is moving).
@@ -287,6 +320,7 @@ export default function CloudCanvas({
   const assembledRef = useRef(assembled)
   assembledRef.current = assembled
   const applyCategoryFilterRef = useRef<() => void>(() => {})
+  const runGatherRef = useRef<(category: CategoryId | null) => void>(() => {})
   const categoryByIdRef = useRef(categoryById)
   categoryByIdRef.current = categoryById
   const activeCategoryRef = useRef(activeCategory)
@@ -541,6 +575,80 @@ export default function CloudCanvas({
       return true
     }
 
+    /**
+     * Packs one theme's puffs into a cloud of their own, centred where the
+     * big cloud already is. Every other puff's gather slot is reset to where
+     * it already sits, so it simply stays put.
+     *
+     * Returns the bounds of the gathered cloud so the camera can frame it, or
+     * null when there's nothing in that theme.
+     */
+    function assignGatherTargets(category: CategoryId) {
+      const motions = puffMotionRef.current
+      const centre = contentCentre()
+
+      const members: Array<{ id: string; motion: PuffMotion }> = []
+      for (const [id, motion] of motions) {
+        // Reset first: a puff that belonged to the previously gathered theme
+        // has to be released, not left holding an old slot.
+        motion.gatherX = motion.baseX
+        motion.gatherY = motion.baseY
+        if (motion.category === category) members.push({ id, motion })
+      }
+      if (members.length === 0) {
+        gatheredCategoryRef.current = null
+        gatheredOrderRef.current = []
+        return null
+      }
+
+      // Innermost puffs take the innermost spiral slots, so the gather reads
+      // as the theme condensing in place rather than every puff swapping
+      // sides. Same reasoning as assignPortraitTargets' pairing by angle, and
+      // like it, deterministic — no randomness to desynchronise anything.
+      const distance = (m: PuffMotion) => Math.hypot(m.baseX - centre.x, m.baseY - centre.y)
+      members.sort((a, b) => distance(a.motion) - distance(b.motion))
+
+      // The packer fills its spiral by array index, so holding the member
+      // order steady is what keeps already-gathered puffs in the slots they
+      // are already sitting in. Without this, one message arriving mid-gather
+      // would sort into the middle and shuffle the whole cloud around it.
+      const byId = new Map(members.map((m) => [m.id, m]))
+      const order: string[] = []
+      for (const id of gatheredOrderRef.current) {
+        if (byId.has(id)) {
+          order.push(id)
+          byId.delete(id)
+        }
+      }
+      for (const { id } of members) if (byId.has(id)) order.push(id)
+      gatheredOrderRef.current = order
+
+      // Fitted, not the plain packer: a theme is a fraction of the cloud, and
+      // at that fill the full-size mask would leave it a featureless circle.
+      const slots = layoutCloudFitted(order)
+      const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
+      for (let i = 0; i < order.length; i++) {
+        const motion = motions.get(order[i])
+        if (!motion) continue
+        const x = centre.x + slots[i].x
+        const y = centre.y + slots[i].y
+        motion.gatherX = x
+        motion.gatherY = y
+        box.minX = Math.min(box.minX, x)
+        box.maxX = Math.max(box.maxX, x)
+        box.minY = Math.min(box.minY, y)
+        box.maxY = Math.max(box.maxY, y)
+      }
+
+      gatheredCategoryRef.current = category
+      return {
+        minX: box.minX - CONTENT_FIT_PADDING,
+        maxX: box.maxX + CONTENT_FIT_PADDING,
+        minY: box.minY - CONTENT_FIT_PADDING,
+        maxY: box.maxY + CONTENT_FIT_PADDING,
+      }
+    }
+
     function syncPuffs() {
       const shadowsLayer = shadowsLayerRef.current
       const puffsLayer = puffsLayerRef.current
@@ -629,6 +737,15 @@ export default function CloudCanvas({
       if (assembledRef.current && assignPortraitTargets()) {
         targetsDirtyRef.current = true
       }
+
+      // Likewise for a gathered theme: a new message of that theme should
+      // join its cloud rather than hang back at its slot in the big one.
+      // assignGatherTargets holds the existing member order, so the puffs
+      // already gathered keep the slots they're sitting in.
+      const gathered = gatheredCategoryRef.current
+      if (gathered && assignGatherTargets(gathered)) {
+        targetsDirtyRef.current = true
+      }
     }
 
     syncPuffsRef.current = syncPuffs
@@ -710,6 +827,7 @@ export default function CloudCanvas({
         function frameBounds(
           box: { minX: number; maxX: number; minY: number; maxY: number },
           animateMs: number | null,
+          maxZoom: number = MAX_ZOOM,
         ) {
           const el = containerRef.current
           const screenWidth = el?.clientWidth || window.innerWidth
@@ -730,7 +848,7 @@ export default function CloudCanvas({
             (screenHeight * 0.85) / (bounds.maxY - bounds.minY),
           )
           const minZoom = Math.min(MIN_ZOOM, fullMaskFitScale, fitScale)
-          const appliedZoom = Math.max(minZoom, Math.min(fitScale, MAX_ZOOM))
+          const appliedZoom = Math.max(minZoom, Math.min(fitScale, maxZoom))
 
           // The pan-clamp box has to be at least as big as whatever's
           // actually visible (screen size / zoom, in world units), or the
@@ -829,6 +947,71 @@ export default function CloudCanvas({
         }
         runAssembleRef.current = runAssemble
 
+        /**
+         * Pulls one theme into a cloud of its own, or releases it back.
+         *
+         * The camera only follows while the portrait isn't up: assembling is
+         * the shared moment and owns the framing, and gathering is a private
+         * per-viewer thing that must not fight it.
+         */
+        function runGather(category: CategoryId | null) {
+          const progress = gatherProgressRef.current
+          const previous = gatheredCategoryRef.current
+          gsap.killTweensOf(progress)
+
+          if (category === null) {
+            if (previous === null && progress.value === 0) return
+            gatheredCategoryRef.current = null
+            gatheredOrderRef.current = []
+            gsap.to(progress, {
+              value: 0,
+              duration: SCATTER_DURATION_S,
+              ease: 'power2.inOut',
+              // Slots stay where they are during the scatter; only once it
+              // lands is it safe to forget them.
+              onComplete: () => {
+                for (const motion of puffMotionRef.current.values()) {
+                  motion.gatherX = motion.baseX
+                  motion.gatherY = motion.baseY
+                }
+              },
+            })
+            if (!assembledRef.current) {
+              frameBounds(contentFitBounds(), SCATTER_DURATION_S * 1000)
+            }
+            return
+          }
+
+          // Straight from one theme to another: scatter the old one first,
+          // then gather the new. Sliding between two packings would send both
+          // sets of puffs through each other, which reads as noise.
+          if (previous !== null && previous !== category && progress.value > 0) {
+            gsap
+              .timeline()
+              .to(progress, { value: 0, duration: GATHER_SWAP_OUT_S, ease: 'power2.in' })
+              .call(() => {
+                const box = assignGatherTargets(category)
+                if (box && !assembledRef.current) {
+                  frameBounds(box, GATHER_DURATION_S * 1000, GATHER_MAX_ZOOM)
+                }
+              })
+              .to(progress, { value: 1, duration: GATHER_DURATION_S, ease: 'power2.out' })
+            return
+          }
+
+          const box = assignGatherTargets(category)
+          if (!box) return
+          gsap.to(progress, {
+            value: 1,
+            duration: GATHER_DURATION_S,
+            ease: 'power2.inOut',
+          })
+          if (!assembledRef.current) {
+            frameBounds(box, GATHER_DURATION_S * 1000, GATHER_MAX_ZOOM)
+          }
+        }
+        runGatherRef.current = runGather
+
         readyRef.current = true
         syncPuffs()
         frameBounds(contentFitBounds(), null)
@@ -840,26 +1023,30 @@ export default function CloudCanvas({
         // that puff's pixel slot in the portrait as assemble progress rises.
         // Puffs still flying in via animateEntry's own tween are skipped.
         let lastProgress = -1
+        let lastGather = -1
         app.ticker.add(() => {
           const progress = assembleProgressRef.current.value
+          const gather = gatherProgressRef.current.value
           const progressChanged = progress !== lastProgress
+          const gatherChanged = gather !== lastGather
           const targetsDirty = targetsDirtyRef.current
           lastProgress = progress
+          lastGather = gather
           targetsDirtyRef.current = false
+          // Either transition running is reason enough to keep updating.
+          const moving = progressChanged || gatherChanged || targetsDirty
 
           // Fully assembled and settled: nothing is moving, so skip a loop
           // that would otherwise touch every puff in the cloud every frame.
-          if (progress >= 1 && !progressChanged && !targetsDirty) return
+          if (progress >= 1 && !moving) return
 
           // Zoomed out far enough that a puff's whole drift travels less than
           // a pixel on screen, the sway is invisible — and that's exactly the
           // view where every puff in the cloud is on screen at once. Holding
-          // them still costs nothing and looks identical.
-          if (
-            !progressChanged &&
-            !targetsDirty &&
-            DRIFT_MAX_AMPLITUDE * viewport.scale.x < DRIFT_VISIBLE_PIXELS
-          ) {
+          // them still costs nothing and looks identical. A gather travels far
+          // further than the drift does, so it has to be exempt or starting
+          // one from the zoomed-out view would freeze it.
+          if (!moving && DRIFT_MAX_AMPLITUDE * viewport.scale.x < DRIFT_VISIBLE_PIXELS) {
             return
           }
 
@@ -910,9 +1097,13 @@ export default function CloudCanvas({
               // Where the puff sits ignoring its sway — cheap to derive, and
               // within a few units of the real position at any progress, so
               // it's a sound basis for the cull test without having to
-              // update the sprite first.
-              const settledX = lerp(motion.baseX, motion.targetX, progress)
-              const settledY = lerp(motion.baseY, motion.targetY, progress)
+              // update the sprite first. Gather first, then portrait: the
+              // portrait is the shared image and has to win outright, so it
+              // interpolates from wherever the gather left the puff.
+              const gatheredX = lerp(motion.baseX, motion.gatherX, gather)
+              const gatheredY = lerp(motion.baseY, motion.gatherY, gather)
+              const settledX = lerp(gatheredX, motion.targetX, progress)
+              const settledY = lerp(gatheredY, motion.targetY, progress)
               if (
                 settledX < cullLeft ||
                 settledX > cullRight ||
@@ -930,8 +1121,10 @@ export default function CloudCanvas({
               const wobble =
                 Math.sin(now * motion.freqR + motion.phaseR) * motion.ampR * driftScale
 
-              sprite.x = lerp(motion.baseX + dx, motion.targetX, progress)
-              sprite.y = lerp(motion.baseY + dy, motion.targetY, progress)
+              // Drift is added after the gather lerp, so a gathered theme
+              // keeps swaying — it should read as a cloud, not a frozen blob.
+              sprite.x = lerp(gatheredX + dx, motion.targetX, progress)
+              sprite.y = lerp(gatheredY + dy, motion.targetY, progress)
               sprite.rotation = motion.baseRotation * driftScale + wobble
 
               if (writeAppearance) {
@@ -996,8 +1189,12 @@ export default function CloudCanvas({
       resizeObserver.disconnect()
       readyRef.current = false
       gsap.killTweensOf(assembleProgressRef.current)
+      gsap.killTweensOf(gatherProgressRef.current)
       runAssembleRef.current = () => {}
       applyCategoryFilterRef.current = () => {}
+      runGatherRef.current = () => {}
+      gatheredCategoryRef.current = null
+      gatheredOrderRef.current = []
       appRef.current?.destroy(true, { children: true })
       appRef.current = null
       viewportRef.current = null
@@ -1029,9 +1226,11 @@ export default function CloudCanvas({
     runAssembleRef.current(assembled)
   }, [assembled])
 
-  // Fade the cloud back to whichever theme is isolated (or restore all of it).
+  // Picking a theme fades the rest of the cloud back and pulls that theme's
+  // puffs into a cloud of their own.
   useEffect(() => {
     applyCategoryFilterRef.current()
+    runGatherRef.current(activeCategory)
   }, [activeCategory])
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
