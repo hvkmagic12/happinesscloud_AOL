@@ -26,7 +26,7 @@ import {
   PORTRAITS,
   preloadPortrait,
 } from './portrait'
-import type { PortraitId, PortraitLayout } from './portrait'
+import type { PortraitId, PortraitLayout, PortraitTarget } from './portrait'
 
 gsap.registerPlugin(MotionPathPlugin)
 
@@ -103,6 +103,14 @@ const PORTRAIT_CELL_SIZE = 78
 const PORTRAIT_PUFF_OVERLAP = 1.3
 // Labels would obscure the picture, so they're hidden past this progress.
 const PORTRAIT_LABEL_CUTOFF = 0.05
+// The picture is drawn at whatever grid the available puffs can fill, so its
+// sharpness is bounded by how many messages have been sent. Early in an event
+// that isn't many: 1000 messages resolve to about 34x38 cells, which reads as
+// a smudge. Below this many puffs the cloud makes up the difference with
+// plain ones that carry no message, purely so the portrait resolves. 6000
+// lands around 84x94 — sharp enough for the face to read from the back of a
+// room, and well inside what the renderer handles comfortably.
+const PORTRAIT_MIN_CELLS = 6000
 // The page's sky gradient is dimmed toward this as the portrait forms. How
 // far is a property of the picture, not a constant — see PortraitSource.dim.
 const PORTRAIT_DIM_COLOR = 0x191526
@@ -434,6 +442,19 @@ export default function CloudCanvas({
   // so an arriving message appends rather than reshuffling everyone.
   const gatheredOrderRef = useRef<string[]>([])
   const portraitLayoutRef = useRef<PortraitLayout | null>(null)
+  // Message-less puffs that exist only to give the portrait enough pixels.
+  // Kept apart from spritesRef/puffMotionRef, which are keyed by message id
+  // and drive labelling, filtering and gathering — none of which apply here.
+  const fillersRef = useRef<
+    Array<{
+      sprite: Sprite
+      startX: number
+      startY: number
+      targetX: number
+      targetY: number
+    }>
+  >([])
+  const fillerLayerRef = useRef<Container | null>(null)
   // Forces one more ticker pass after targets change while already
   // assembled (the loop otherwise short-circuits when nothing is moving).
   const targetsDirtyRef = useRef(false)
@@ -873,6 +894,26 @@ export default function CloudCanvas({
       // The next batch is scheduled when this one finishes clearing, not here.
     }
 
+    // The mask is sized with room to grow, so early in an event actual
+    // content fills only a fraction of it — framing the whole mask would
+    // strand the real messages as a tiny cluster in empty space.
+    function contentFitBounds() {
+      const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
+      for (const motion of puffMotionRef.current.values()) {
+        box.minX = Math.min(box.minX, motion.baseX)
+        box.maxX = Math.max(box.maxX, motion.baseX)
+        box.minY = Math.min(box.minY, motion.baseY)
+        box.maxY = Math.max(box.maxY, motion.baseY)
+      }
+      if (box.minX > box.maxX) return cloudBounds()
+      return {
+        minX: box.minX - CONTENT_FIT_PADDING,
+        maxX: box.maxX + CONTENT_FIT_PADDING,
+        minY: box.minY - CONTENT_FIT_PADDING,
+        maxY: box.maxY + CONTENT_FIT_PADDING,
+      }
+    }
+
     function contentCentre() {
       const motions = puffMotionRef.current
       let x = 0
@@ -896,9 +937,13 @@ export default function CloudCanvas({
       // Centre the portrait on the cloud so the gather reads as the cloud
       // itself reshaping rather than flying off somewhere else.
       const centre = contentCentre()
+      // Ask for enough cells to draw a sharp picture even when few messages
+      // have arrived; anything the messages can't fill is made up with plain
+      // puffs below.
+      const slotCount = Math.max(entries.length, PORTRAIT_MIN_CELLS)
       const layout = buildPortraitLayout(
         id,
-        entries.length,
+        slotCount,
         PORTRAIT_CELL_SIZE,
         centre.x,
         centre.y,
@@ -927,18 +972,85 @@ export default function CloudCanvas({
         )
 
       const targetScale = (PORTRAIT_CELL_SIZE * PORTRAIT_PUFF_OVERLAP) / PUFF_TEXTURE_SIZE
+
+      // Real messages are spread evenly across the whole picture rather than
+      // packed into one region of it — every message should be part of the
+      // face, not relegated to a corner while filler draws the rest. Striding
+      // through the angle-sorted targets keeps that spread while preserving
+      // the left/right/top/bottom pairing above.
+      const stride = targets.length / entries.length
+      const takenByMessages = new Set<number>()
       for (let i = 0; i < entries.length; i++) {
+        const index = Math.min(targets.length - 1, Math.floor(i * stride))
         const motion = entries[i]
-        const target = targets[i % targets.length]
+        const target = targets[index]
         motion.targetX = target.x
         motion.targetY = target.y
         motion.targetTint = target.tint
         motion.targetScale = targetScale
+        takenByMessages.add(index)
       }
+
+      const spare: PortraitTarget[] = []
+      for (let i = 0; i < targets.length; i++) {
+        if (!takenByMessages.has(i)) spare.push(targets[i])
+      }
+      syncFillers(spare, targetScale)
 
       portraitLayoutRef.current = layout
       assignedPortraitRef.current = id
       return true
+    }
+
+    // Deterministic [0,1) from an integer, so filler puffs start from the same
+    // scattered positions on every screen rather than drifting apart.
+    function hashUnit(n: number): number {
+      const x = Math.sin(n * 12.9898 + 78.233) * 43758.5453
+      return x - Math.floor(x)
+    }
+
+    /**
+     * Builds (or rebuilds) the message-less puffs that pad the portrait out to
+     * a readable resolution.
+     *
+     * They begin scattered through the existing cloud rather than appearing
+     * out of empty sky, so the assembly reads as the cloud thickening into the
+     * picture. They fade in with the assemble and back out on release — see
+     * the ticker — and are destroyed once the cloud has fully dispersed.
+     */
+    function syncFillers(spare: PortraitTarget[], targetScale: number) {
+      const layer = fillerLayerRef.current
+      const currentApp = appRef.current
+      if (!layer || !currentApp) return
+
+      destroyFillers()
+      if (spare.length === 0) return
+
+      const texture = getPuffTexture(currentApp.renderer)
+      const box = contentFitBounds()
+      const spanX = box.maxX - box.minX
+      const spanY = box.maxY - box.minY
+
+      for (let i = 0; i < spare.length; i++) {
+        const target = spare[i]
+        const sprite = new Sprite(texture)
+        sprite.anchor.set(0.5)
+        sprite.tint = target.tint
+        sprite.alpha = 0
+        const startX = box.minX + hashUnit(i * 2 + 1) * spanX
+        const startY = box.minY + hashUnit(i * 2 + 2) * spanY
+        sprite.x = startX
+        sprite.y = startY
+        sprite.scale.set(targetScale)
+        layer.addChild(sprite)
+        fillersRef.current.push({ sprite, startX, startY, targetX: target.x, targetY: target.y })
+      }
+    }
+
+    function destroyFillers() {
+      if (fillersRef.current.length === 0) return
+      for (const filler of fillersRef.current) filler.sprite.destroy()
+      fillersRef.current = []
     }
 
     /**
@@ -1187,6 +1299,12 @@ export default function CloudCanvas({
         viewport.addChild(shadowsLayer)
         shadowsLayerRef.current = shadowsLayer
 
+        // Below the message puffs: filler is scenery, and a real message
+        // should never be hidden behind one.
+        const fillerLayer = new Container()
+        viewport.addChild(fillerLayer)
+        fillerLayerRef.current = fillerLayer
+
         const puffsLayer = new Container()
         viewport.addChild(puffsLayer)
         puffsLayerRef.current = puffsLayer
@@ -1269,23 +1387,6 @@ export default function CloudCanvas({
         // The mask is sized with room to grow, so early in an event actual
         // content fills only a fraction of it — framing the whole mask would
         // strand the real messages as a tiny cluster in empty space.
-        function contentFitBounds() {
-          const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
-          for (const motion of puffMotionRef.current.values()) {
-            box.minX = Math.min(box.minX, motion.baseX)
-            box.maxX = Math.max(box.maxX, motion.baseX)
-            box.minY = Math.min(box.minY, motion.baseY)
-            box.maxY = Math.max(box.maxY, motion.baseY)
-          }
-          if (box.minX > box.maxX) return bounds
-          return {
-            minX: box.minX - CONTENT_FIT_PADDING,
-            maxX: box.maxX + CONTENT_FIT_PADDING,
-            minY: box.minY - CONTENT_FIT_PADDING,
-            maxY: box.maxY + CONTENT_FIT_PADDING,
-          }
-        }
-
         // Eases the camera onto whatever the portrait layout currently is.
         function framePortrait(layout: PortraitLayout, ms: number) {
           const centre = contentCentre()
@@ -1357,7 +1458,11 @@ export default function CloudCanvas({
               duration: DISPERSE_DURATION_S,
               ease: 'power2.inOut',
               overwrite: true,
-              onComplete: applyCategoryFilter,
+              onComplete: () => {
+                applyCategoryFilter()
+                // The picture's padding has served its purpose.
+                destroyFillers()
+              },
             })
             frameBounds(contentFitBounds(), DISPERSE_DURATION_S * 1000)
           }
@@ -1519,6 +1624,25 @@ export default function CloudCanvas({
           // in, this is a few hundred puffs instead of every one in the
           // cloud; the margin keeps a screen's worth ready just out of sight
           // so panning reveals finished puffs rather than blanks.
+          // Filler puffs read the same progress value as everything else, so
+          // padding the picture costs one lerp each while a transition is
+          // running and nothing at all once it settles. They have no drift,
+          // no label and no filter state — they only exist to be pixels.
+          if (progressChanged || targetsDirty) {
+            for (const filler of fillersRef.current) {
+              filler.sprite.x = lerp(filler.startX, filler.targetX, progress)
+              filler.sprite.y = lerp(filler.startY, filler.targetY, progress)
+              filler.sprite.alpha = progress
+            }
+            // Guaranteed cleanup is the disperse tween's onComplete; this only
+            // catches the case where progress is parked at rest. Deliberately
+            // a threshold rather than `=== 0`: gsap clamps its time delta when
+            // frames run long (lag smoothing), so on a slow device the value
+            // creeps toward zero over many seconds instead of landing on it,
+            // and an exact comparison simply never fires.
+            if (progress < 0.001) destroyFillers()
+          }
+
           const view = viewport.getVisibleBounds()
           const cullLeft = view.x - CULL_MARGIN
           const cullRight = view.x + view.width + CULL_MARGIN
@@ -1649,6 +1773,9 @@ export default function CloudCanvas({
       viewportRef.current = null
       backdropLayerRef.current = null
       dimSpriteRef.current = null
+      // The app teardown below destroys the sprites themselves.
+      fillersRef.current = []
+      fillerLayerRef.current = null
       assignedPortraitRef.current = null
       shadowsLayerRef.current = null
       puffsLayerRef.current = null
