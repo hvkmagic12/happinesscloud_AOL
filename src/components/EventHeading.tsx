@@ -1,3 +1,4 @@
+import { GURUDEV_QUOTE, GURUDEV_QUOTE_SOURCE } from '../lib/quote'
 import './EventHeading.css'
 
 /**
@@ -6,9 +7,11 @@ import './EventHeading.css'
  */
 export default function EventHeading() {
   return (
-    <header className="event-heading" aria-label="Gift of Gratitude, Boone, North Carolina">
-      <h1 className="event-heading-title">Gift of Gratitude</h1>
-      <p className="event-heading-place">Boone, North Carolina</p>
+    <header className="event-heading">
+      <blockquote className="event-heading-quote">
+        <p className="event-heading-quote-text">{GURUDEV_QUOTE}</p>
+        <footer className="event-heading-quote-source">{GURUDEV_QUOTE_SOURCE}</footer>
+      </blockquote>
     </header>
   )
 }

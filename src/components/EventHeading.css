@@ -12,48 +12,89 @@
      screens the heading is inset to stay clear of them. */
   padding-left: max(16px, 26vw);
   padding-right: max(16px, 26vw);
+  /* Room for the scrim below to fade out before it ends. */
+  padding-bottom: 30px;
 }
 
-.event-heading-title {
+/* A quote this long overlaps the cloud, and eight lines of serif over a dense
+   field of coloured puffs is unreadable on a text-shadow alone — the tail of
+   the quote and the lines under it were washing out completely. This fades
+   the backdrop behind the text and disappears before the cloud does. */
+.event-heading::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+    180deg,
+    rgba(206, 233, 255, 0.94) 0%,
+    rgba(212, 234, 255, 0.82) 45%,
+    rgba(222, 238, 255, 0) 100%
+  );
+  transition: background 3.2s ease;
+}
+
+/* Behind an assembled portrait the screen is dark, so the scrim inverts with
+   everything else. */
+.is-dimmed .event-heading::before {
+  background: linear-gradient(
+    180deg,
+    rgba(20, 17, 32, 0.88) 0%,
+    rgba(22, 18, 35, 0.7) 45%,
+    rgba(25, 21, 38, 0) 100%
+  );
+}
+
+.event-heading-quote {
+  /* Capped independently of the padding above: on a projector the inset alone
+     would leave a line far too long to read comfortably. */
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0;
+}
+
+.event-heading-quote-text {
   margin: 0;
-  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
-  /* Scales with the viewport so it reads on a phone and on a projector
-     without needing breakpoints. */
-  font-size: clamp(28px, 5.2vw, 64px);
-  font-weight: 600;
-  line-height: 1.1;
-  letter-spacing: 0.01em;
+  font-family: 'Poppins', system-ui, sans-serif;
+  /* Much smaller than the title this replaced. At 330 characters the old
+     clamp(28px, 5.2vw, 64px) would have covered most of the cloud; this is
+     sized to read from across a room without doing that. Poppins sets wider
+     than the serif it replaced, so it runs a step smaller for the same
+     number of lines. */
+  font-size: clamp(12px, 1.25vw, 18px);
+  font-weight: 400;
+  line-height: 1.5;
   color: #3a3450;
   /* Keeps the text legible wherever puffs drift behind it. */
-  text-shadow: 0 2px 14px rgba(255, 255, 255, 0.85);
+  text-shadow: 0 2px 14px rgba(255, 255, 255, 0.9), 0 0 6px rgba(255, 255, 255, 0.8);
 }
 
-.event-heading-place {
-  margin: 4px 0 0;
-  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
-  font-size: clamp(13px, 1.9vw, 24px);
-  font-weight: 500;
-  letter-spacing: 0.16em;
+.event-heading-quote-source {
+  margin-top: 8px;
+  font-family: 'Poppins', system-ui, sans-serif;
+  font-size: clamp(10px, 0.9vw, 13px);
+  font-weight: 600;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: #6b6379;
-  text-shadow: 0 2px 10px rgba(255, 255, 255, 0.85);
+  text-shadow: 0 2px 10px rgba(255, 255, 255, 0.9);
 }
 
 /* The canvas dims the screen behind an assembled portrait, so the heading
    inverts to stay readable. Matches ASSEMBLE_DURATION_S in CloudCanvas. */
-.event-heading-title,
-.event-heading-place {
+.event-heading-quote-text,
+.event-heading-quote-source {
   transition: color 3.2s ease, text-shadow 3.2s ease;
 }
 
-.is-dimmed .event-heading-title {
+.is-dimmed .event-heading-quote-text {
   color: #f4f1fa;
-  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55);
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6);
 }
 
-.is-dimmed .event-heading-place {
+.is-dimmed .event-heading-quote-source {
   color: #c9c2dc;
-  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.5);
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
 }
 
 @media (max-width: 640px) {
@@ -65,7 +106,8 @@
     padding-top: calc(58px + env(safe-area-inset-top));
   }
 
-  .event-heading-place {
-    letter-spacing: 0.12em;
+  .event-heading-quote-text {
+    font-size: 11.5px;
+    line-height: 1.45;
   }
 }

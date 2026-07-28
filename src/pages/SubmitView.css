@@ -40,9 +40,11 @@
 
 .submit-quote-text {
   margin: 0;
-  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
-  font-size: 19px;
-  line-height: 1.42;
+  font-family: 'Poppins', system-ui, sans-serif;
+  /* Poppins sets wider than the serif it replaced, so it runs smaller to keep
+     the whole card on one phone screen. */
+  font-size: 15px;
+  line-height: 1.55;
   color: #3a3450;
 }
 
@@ -53,12 +55,6 @@
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: #8b849c;
-}
-
-.submit-card p.subtitle {
-  margin: 0 0 24px;
-  color: #6b6379;
-  font-size: 15px;
 }
 
 .submit-name-row {
@@ -169,12 +165,7 @@
   }
 
   .submit-quote-text {
-    font-size: 17px;
-  }
-
-  .submit-card p.subtitle {
-    margin-bottom: 18px;
-    font-size: 14px;
+    font-size: 13.5px;
   }
 
   /* Side by side, "Name (optional)" is clipped mid-placeholder on a phone —
