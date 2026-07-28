@@ -36,6 +36,19 @@
   box-shadow: 0 4px 16px rgba(80, 60, 120, 0.12);
 }
 
+/* See AdminView.css — the canvas dims the screen behind the portrait, so the
+   chrome flips to light-on-dark over the same 3.2s the assemble takes. */
+.cloud-view .cloud-counter,
+.cloud-view .cloud-back-link {
+  transition: background 3.2s ease, color 3.2s ease;
+}
+
+.cloud-view.is-assembled .cloud-counter,
+.cloud-view.is-assembled .cloud-back-link {
+  background: rgba(255, 255, 255, 0.14);
+  color: #e8e4f2;
+}
+
 .cloud-state {
   position: absolute;
   inset: 0;

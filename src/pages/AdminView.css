@@ -21,11 +21,44 @@
   box-shadow: 0 4px 16px rgba(80, 60, 120, 0.12);
 }
 
-.assemble-button {
+.admin-controls {
   position: absolute;
   top: 16px;
   right: 16px;
   z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Segmented picker for which picture the cloud assembles into. */
+.portrait-picker {
+  display: flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 4px 16px rgba(80, 60, 120, 0.12);
+}
+
+.portrait-picker button {
+  border: none;
+  border-radius: 999px;
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 13px;
+  color: #6b6379;
+  background: none;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.portrait-picker button.is-selected {
+  background: #6f66ad;
+  color: #fff;
+}
+
+.assemble-button {
   border: none;
   border-radius: 999px;
   padding: 10px 24px;
@@ -50,6 +83,32 @@
 .assemble-button.is-assembled {
   background: linear-gradient(135deg, #8f86c9, #6f66ad);
   box-shadow: 0 8px 22px rgba(90, 80, 150, 0.35);
+}
+
+/* While the portrait is up the canvas dims the whole screen behind it, so the
+   chrome has to move to light-on-dark or it becomes unreadable. The duration
+   matches ASSEMBLE_DURATION_S in CloudCanvas so the two move together. */
+.admin-view .admin-counter,
+.admin-view .portrait-picker {
+  transition: background 3.2s ease, color 3.2s ease;
+}
+
+.admin-view.is-assembled .admin-counter {
+  background: rgba(255, 255, 255, 0.14);
+  color: #e8e4f2;
+}
+
+.admin-view.is-assembled .portrait-picker {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.admin-view.is-assembled .portrait-picker button {
+  color: #d9d4e8;
+}
+
+.admin-view.is-assembled .portrait-picker button.is-selected {
+  background: rgba(255, 255, 255, 0.9);
+  color: #3a3450;
 }
 
 .admin-state {

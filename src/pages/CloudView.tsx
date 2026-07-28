@@ -17,14 +17,14 @@ export default function CloudView() {
   const { messages, state, reload } = useLiveMessages()
   // Read-only here: only the admin page can trigger the assembly, but every
   // viewer follows along live.
-  const { assembled } = useCloudCommands()
+  const { assembled, portrait } = useCloudCommands()
   const { categoryById, counts, present } = useMessageCategories(messages)
   // Filtering is per-viewer, unlike assemble — one person exploring the
   // themes on their phone shouldn't change what the room's screen shows.
   const [activeCategory, setActiveCategory] = useState<CategoryId | null>(null)
 
   return (
-    <div className="cloud-view">
+    <div className={`cloud-view ${assembled ? 'is-assembled' : ''}`}>
       {state === 'ready' && (
         <span className="cloud-counter">{messages.length} messages shared</span>
       )}
@@ -63,6 +63,7 @@ export default function CloudView() {
             messages={messages}
             justSubmittedId={justSubmittedId}
             assembled={assembled}
+            portraitId={portrait}
             categoryById={categoryById}
             activeCategory={activeCategory}
           />

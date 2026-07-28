@@ -1,5 +1,13 @@
 import { useEffect, useRef } from 'react'
-import { Application, CanvasTextMetrics, Container, Sprite, Text, TextStyle } from 'pixi.js'
+import {
+  Application,
+  CanvasTextMetrics,
+  Container,
+  Sprite,
+  Text,
+  Texture,
+  TextStyle,
+} from 'pixi.js'
 import { Viewport } from 'pixi-viewport'
 import gsap from 'gsap'
 import { MotionPathPlugin } from 'gsap/MotionPathPlugin'
@@ -10,8 +18,14 @@ import { createLayoutCache, layoutCloudFitted } from './layout'
 import { CLOUD_LOBES, cloudBounds } from './cloudShape'
 import { getPuffTexture, PUFF_TEXTURE_SIZE } from './puffTexture'
 import { CLOUD_BACKDROP_TINT, puffTint } from './color'
-import { buildPortraitLayout, isPortraitReady, preloadPortrait } from './portrait'
-import type { PortraitLayout } from './portrait'
+import {
+  buildPortraitLayout,
+  DEFAULT_PORTRAIT,
+  isPortraitReady,
+  PORTRAITS,
+  preloadPortrait,
+} from './portrait'
+import type { PortraitId, PortraitLayout } from './portrait'
 
 gsap.registerPlugin(MotionPathPlugin)
 
@@ -88,6 +102,17 @@ const PORTRAIT_CELL_SIZE = 78
 const PORTRAIT_PUFF_OVERLAP = 1.3
 // Labels would obscure the picture, so they're hidden past this progress.
 const PORTRAIT_LABEL_CUTOFF = 0.05
+// The page's sky gradient is dimmed toward this as the portrait forms.
+//
+// Not decoration. Puffs are drawn from a soft-edged texture, so each one
+// composites partly over whatever is behind it: against a pale sky a colour
+// portrait comes out chalky, and Gurudev's white robe disappears into the
+// background entirely. Darkening gives every puff something to read against.
+const PORTRAIT_DIM_COLOR = 0x191526
+const PORTRAIT_DIM_MAX = 0.9
+// Swapping pictures while already assembled scatters back to the cloud and
+// re-forms, since at progress 1 new targets would simply teleport.
+const PORTRAIT_SWAP_OUT_S = 1.1
 
 // Isolating one category fades the rest back rather than hiding them, so the
 // selected group is legible while the cloud keeps its overall shape and you
@@ -257,6 +282,8 @@ export interface CloudCanvasProps {
   onJustSubmittedAnimationDone?: () => void
   /** When true, the cloud gathers into the Gurudev portrait. */
   assembled?: boolean
+  /** Which picture it gathers into. */
+  portraitId?: PortraitId
   /** Message id -> theme, deciding each puff's colour. */
   categoryById?: Map<string, CategoryId>
   /** When set, only this theme's puffs stay lit; the rest fade back. */
@@ -268,6 +295,7 @@ export default function CloudCanvas({
   justSubmittedId,
   onJustSubmittedAnimationDone,
   assembled = false,
+  portraitId = DEFAULT_PORTRAIT,
   categoryById,
   activeCategory = null,
 }: CloudCanvasProps) {
@@ -319,6 +347,13 @@ export default function CloudCanvas({
   const runAssembleRef = useRef<(next: boolean) => void>(() => {})
   const assembledRef = useRef(assembled)
   assembledRef.current = assembled
+  // Latest prop, for the imperative code below.
+  const portraitIdRef = useRef(portraitId)
+  portraitIdRef.current = portraitId
+  // Which picture the current target slots were actually built from — the
+  // prop can change while the old one is still on screen.
+  const assignedPortraitRef = useRef<PortraitId | null>(null)
+  const dimSpriteRef = useRef<Sprite | null>(null)
   const applyCategoryFilterRef = useRef<() => void>(() => {})
   const runGatherRef = useRef<(category: CategoryId | null) => void>(() => {})
   const categoryByIdRef = useRef(categoryById)
@@ -344,14 +379,19 @@ export default function CloudCanvas({
     const app = new Application()
     appRef.current = app
 
-    // Decode the portrait up front so an assemble command can fire with no
-    // image-loading latency in the way — every screen has to start together.
-    preloadPortrait()
-      .then(() => {
-        // The command may have arrived while the image was still loading.
-        if (!disposed && assembledRef.current) runAssembleRef.current(true)
-      })
-      .catch((err) => console.error(err))
+    // Decode every portrait up front so an assemble command can fire with no
+    // image-loading latency in the way — every screen has to start together —
+    // and so switching between pictures is instant.
+    for (const id of Object.keys(PORTRAITS) as PortraitId[]) {
+      preloadPortrait(id)
+        .then(() => {
+          // The command may have arrived while the image was still loading.
+          if (disposed || !assembledRef.current) return
+          if (portraitIdRef.current !== id) return
+          runAssembleRef.current(true)
+        })
+        .catch((err) => console.error(err))
+    }
 
     function animateEntry(id: string, sprite: Sprite, targetX: number, targetY: number) {
       const viewport = viewportRef.current
@@ -525,14 +565,15 @@ export default function CloudCanvas({
      * there's nothing to assemble yet (no puffs, or the image hasn't
      * finished loading).
      */
-    function assignPortraitTargets(): boolean {
+    function assignPortraitTargets(id: PortraitId = portraitIdRef.current): boolean {
       const entries = [...puffMotionRef.current.values()]
-      if (entries.length === 0 || !isPortraitReady()) return false
+      if (entries.length === 0 || !isPortraitReady(id)) return false
 
       // Centre the portrait on the cloud so the gather reads as the cloud
       // itself reshaping rather than flying off somewhere else.
       const centre = contentCentre()
       const layout = buildPortraitLayout(
+        id,
         entries.length,
         PORTRAIT_CELL_SIZE,
         centre.x,
@@ -572,6 +613,7 @@ export default function CloudCanvas({
       }
 
       portraitLayoutRef.current = layout
+      assignedPortraitRef.current = id
       return true
     }
 
@@ -787,6 +829,18 @@ export default function CloudCanvas({
         // fit content, which confuses pixi-viewport's clamp plugin).
         viewport.drag().pinch().wheel().decelerate({ friction: 0.9 })
 
+        // Screen-space dimmer, behind everything the viewport draws and over
+        // the page's CSS sky gradient. Lives on the stage rather than in the
+        // viewport so it needs no world-space maths and is unaffected by pan
+        // and zoom — it simply covers the screen.
+        const dim = new Sprite(Texture.WHITE)
+        dim.tint = PORTRAIT_DIM_COLOR
+        dim.alpha = 0
+        dim.width = container.clientWidth || window.innerWidth
+        dim.height = container.clientHeight || window.innerHeight
+        app.stage.addChildAt(dim, 0)
+        dimSpriteRef.current = dim
+
         // Backdrop: a few large, very-low-opacity puffs matching the cloud
         // lobes, so the mass reads as a cloud silhouette when zoomed out.
         const backdropLayer = new Container()
@@ -908,9 +962,57 @@ export default function CloudCanvas({
           }
         }
 
+        // Eases the camera onto whatever the portrait layout currently is.
+        function framePortrait(layout: PortraitLayout, ms: number) {
+          const centre = contentCentre()
+          frameBounds(
+            {
+              minX: centre.x - layout.width / 2,
+              maxX: centre.x + layout.width / 2,
+              minY: centre.y - layout.height / 2,
+              maxY: centre.y + layout.height / 2,
+            },
+            ms,
+          )
+        }
+
         function runAssemble(next: boolean) {
+          const wantedPortrait = portraitIdRef.current
+
+          // Already assembled and the picture changed: scatter back to the
+          // cloud, swap the slots at the bottom, and re-form. At progress 1
+          // the new targets would otherwise simply teleport into place.
+          if (
+            next &&
+            assembleProgressRef.current.value > 0 &&
+            assignedPortraitRef.current !== null &&
+            assignedPortraitRef.current !== wantedPortrait &&
+            isPortraitReady(wantedPortrait)
+          ) {
+            gsap.killTweensOf(assembleProgressRef.current)
+            gsap
+              .timeline()
+              .to(assembleProgressRef.current, {
+                value: 0,
+                duration: PORTRAIT_SWAP_OUT_S,
+                ease: 'power2.in',
+              })
+              .call(() => {
+                if (!assignPortraitTargets(wantedPortrait)) return
+                const layout = portraitLayoutRef.current
+                if (layout) framePortrait(layout, ASSEMBLE_DURATION_S * 1000)
+              })
+              .to(assembleProgressRef.current, {
+                value: 1,
+                duration: ASSEMBLE_DURATION_S,
+                ease: 'power2.out',
+                onComplete: applyCategoryFilter,
+              })
+            return
+          }
+
           if (next) {
-            if (!assignPortraitTargets()) return
+            if (!assignPortraitTargets(wantedPortrait)) return
             const layout = portraitLayoutRef.current
             if (!layout) return
 
@@ -924,16 +1026,7 @@ export default function CloudCanvas({
               // it stops running. One full pass at the end settles them.
               onComplete: applyCategoryFilter,
             })
-            const centre = contentCentre()
-            frameBounds(
-              {
-                minX: centre.x - layout.width / 2,
-                maxX: centre.x + layout.width / 2,
-                minY: centre.y - layout.height / 2,
-                maxY: centre.y + layout.height / 2,
-              },
-              ASSEMBLE_DURATION_S * 1000,
-            )
+            framePortrait(layout, ASSEMBLE_DURATION_S * 1000)
           } else {
             gsap.to(assembleProgressRef.current, {
               value: 0,
@@ -1063,6 +1156,10 @@ export default function CloudCanvas({
             // the drawing and muddy it, so it fades out as the portrait forms.
             const backdrop = backdropLayerRef.current
             if (backdrop) backdrop.alpha = driftScale
+            // ...and the sky darkens behind it, so the picture has something
+            // to read against.
+            const dimSprite = dimSpriteRef.current
+            if (dimSprite) dimSprite.alpha = progress * PORTRAIT_DIM_MAX
             const shadowsLayer = shadowsLayerRef.current
             if (shadowsLayer) shadowsLayer.visible = showShadows
           }
@@ -1181,6 +1278,11 @@ export default function CloudCanvas({
       if (vp && container) {
         vp.resize(container.clientWidth, container.clientHeight)
       }
+      const dimSprite = dimSpriteRef.current
+      if (dimSprite && container) {
+        dimSprite.width = container.clientWidth
+        dimSprite.height = container.clientHeight
+      }
     })
     resizeObserver.observe(container)
 
@@ -1199,6 +1301,8 @@ export default function CloudCanvas({
       appRef.current = null
       viewportRef.current = null
       backdropLayerRef.current = null
+      dimSpriteRef.current = null
+      assignedPortraitRef.current = null
       shadowsLayerRef.current = null
       puffsLayerRef.current = null
       labelsLayerRef.current = null
@@ -1224,7 +1328,7 @@ export default function CloudCanvas({
   // mount path picks up the current state instead.
   useEffect(() => {
     runAssembleRef.current(assembled)
-  }, [assembled])
+  }, [assembled, portraitId])
 
   // Picking a theme fades the rest of the cloud back and pulls that theme's
   // puffs into a cloud of their own.

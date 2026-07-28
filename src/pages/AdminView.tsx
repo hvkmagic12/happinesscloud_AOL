@@ -10,24 +10,47 @@ import './AdminView.css'
 
 export default function AdminView() {
   const { messages, state, reload } = useLiveMessages()
-  const { assembled, broadcastAssembled } = useCloudCommands()
+  const { assembled, portrait, broadcastAssembled, broadcastPortrait } = useCloudCommands()
   const { categoryById, counts, present } = useMessageCategories(messages)
   const [activeCategory, setActiveCategory] = useState<CategoryId | null>(null)
 
   return (
-    <div className="admin-view">
+    <div className={`admin-view ${assembled ? 'is-assembled' : ''}`}>
       {state === 'ready' && (
         <span className="admin-counter">{messages.length} messages shared</span>
       )}
 
       {state === 'ready' && messages.length > 0 && (
-        <button
-          type="button"
-          className={`assemble-button ${assembled ? 'is-assembled' : ''}`}
-          onClick={() => broadcastAssembled(!assembled)}
-        >
-          {assembled ? 'Release' : 'Assemble'}
-        </button>
+        <div className="admin-controls">
+          {/* Broadcast like Assemble is, so every screen in the room changes
+              picture together — and a screen can never be told to assemble
+              without also being told what into. */}
+          <div className="portrait-picker" role="group" aria-label="Picture">
+            <button
+              type="button"
+              className={portrait === 'photo' ? 'is-selected' : ''}
+              onClick={() => broadcastPortrait('photo')}
+              aria-pressed={portrait === 'photo'}
+            >
+              Photo
+            </button>
+            <button
+              type="button"
+              className={portrait === 'drawing' ? 'is-selected' : ''}
+              onClick={() => broadcastPortrait('drawing')}
+              aria-pressed={portrait === 'drawing'}
+            >
+              Drawing
+            </button>
+          </div>
+          <button
+            type="button"
+            className={`assemble-button ${assembled ? 'is-assembled' : ''}`}
+            onClick={() => broadcastAssembled(!assembled)}
+          >
+            {assembled ? 'Release' : 'Assemble'}
+          </button>
+        </div>
       )}
       <EventHeading />
 
@@ -57,6 +80,7 @@ export default function AdminView() {
           <CloudCanvas
             messages={messages}
             assembled={assembled}
+            portraitId={portrait}
             categoryById={categoryById}
             activeCategory={activeCategory}
           />

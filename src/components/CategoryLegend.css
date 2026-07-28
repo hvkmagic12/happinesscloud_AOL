@@ -13,6 +13,32 @@
   overflow: hidden;
 }
 
+/* Same reasoning as the heading: readable once the screen dims behind an
+   assembled portrait. */
+.category-legend {
+  transition: background 3.2s ease, color 3.2s ease;
+}
+
+.is-assembled .category-legend {
+  background: rgba(38, 32, 58, 0.72);
+  color: #ddd8ea;
+}
+
+.is-assembled .category-legend-title,
+.is-assembled .category-legend-count {
+  color: #b3abc8;
+}
+
+.is-assembled .category-legend-row:hover,
+.is-assembled .category-legend-row.is-active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.is-assembled .category-legend-clear {
+  background: rgba(255, 255, 255, 0.1);
+  color: #c4bdd8;
+}
+
 .category-legend-header {
   display: flex;
   align-items: center;

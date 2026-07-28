@@ -39,6 +39,23 @@
   text-shadow: 0 2px 10px rgba(255, 255, 255, 0.85);
 }
 
+/* The canvas dims the screen behind an assembled portrait, so the heading
+   inverts to stay readable. Matches ASSEMBLE_DURATION_S in CloudCanvas. */
+.event-heading-title,
+.event-heading-place {
+  transition: color 3.2s ease, text-shadow 3.2s ease;
+}
+
+.is-assembled .event-heading-title {
+  color: #f4f1fa;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55);
+}
+
+.is-assembled .event-heading-place {
+  color: #c9c2dc;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.5);
+}
+
 @media (max-width: 640px) {
   .event-heading {
     /* On phones the corner controls sit above the heading rather than

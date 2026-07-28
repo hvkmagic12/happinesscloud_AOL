@@ -23,7 +23,47 @@ export interface PortraitLayout {
   height: number
 }
 
-const PORTRAIT_SRC = `${import.meta.env.BASE_URL}gurudev.jpg`
+export type PortraitId = 'drawing' | 'photo'
+
+interface PortraitSource {
+  src: string
+  /**
+   * 'ink' — dark marks on white paper. Which cells count is decided by how
+   * much of them is ink (see inkCells).
+   * 'photo' — a subject cut out against transparency. Which cells count is
+   * decided by the alpha channel alone (see photoCells).
+   */
+  mode: 'ink' | 'photo'
+  crop: { left: number; right: number; top: number; bottom: number }
+}
+
+export const PORTRAITS: Record<PortraitId, PortraitSource> = {
+  drawing: {
+    src: `${import.meta.env.BASE_URL}gurudev.jpg`,
+    mode: 'ink',
+    // The source is a photograph of a drawing and carries a solid black band
+    // about 15px deep across the top, which would otherwise be read as ink
+    // and assembled as a bar above Gurudev's head. Measured from the image:
+    // the other three edges are clean paper, and the hair runs right up to
+    // the left edge, so cropping that side would eat into the drawing.
+    crop: { left: 0, right: 0, top: 0.028, bottom: 0 },
+  },
+  photo: {
+    // Background-removed during asset prep, and the Art of Living logo band
+    // was cropped off there too.
+    src: `${import.meta.env.BASE_URL}gurudev-color.png`,
+    mode: 'photo',
+    // Trims most of the robe. Two reasons, measured rather than guessed: the
+    // robe was consuming about a fifth of the available puffs, so dropping it
+    // takes the grid from 89x123 to 97x109 and puts that resolution on the
+    // face instead; and the result is squarer, which frames better on a
+    // 16:9 screen than a tall narrow portrait constrained by height. A little
+    // shoulder is kept so it doesn't read as a floating head.
+    crop: { left: 0, right: 0, top: 0, bottom: 0.18 },
+  },
+}
+
+export const DEFAULT_PORTRAIT: PortraitId = 'drawing'
 
 // Cap the decode resolution — the grid sampling below reads every pixel of
 // every cell once per binary-search step. Set above the source's own size so
@@ -32,13 +72,17 @@ const PORTRAIT_SRC = `${import.meta.env.BASE_URL}gurudev.jpg`
 // the portrait recognisable.
 const SAMPLE_MAX_DIM = 640
 
-// The source is a photograph of a drawing and carries a solid black band
-// about 15px deep across the top, which would otherwise be read as ink and
-// assembled as a bar above Gurudev's head. Measured from the image: the
-// other three edges are clean paper, and the hair runs right up to the left
-// edge, so cropping that side would eat into the drawing. Fractions rather
-// than pixels so they survive the photo being re-shot at another size.
-const CROP = { left: 0, right: 0, top: 0.028, bottom: 0 }
+// --- photo mode ---------------------------------------------------------
+// Mean alpha a cell needs before it counts as part of the subject. The
+// cutout's mask is hard-edged, so this only decides how the boundary cells
+// round off.
+const PHOTO_ALPHA_COVERAGE = 0.45
+// Puffs are drawn from a soft-edged texture, so every one composites partly
+// over whatever is behind it and colours arrive on screen paler and flatter
+// than they are in the source. These push back: saturation is multiplied,
+// and lightness is pushed away from mid-grey.
+const PHOTO_SATURATION = 1.35
+const PHOTO_CONTRAST = 1.15
 
 // Pins the ink/paper cutoff if the automatic choice below ever picks badly.
 // Null means "use Otsu", which is the intended path.
@@ -61,7 +105,11 @@ interface Sample {
   data: Uint8ClampedArray
   width: number
   height: number
-  /** Luminance cutoff separating ink from paper, derived once at preload. */
+  mode: 'ink' | 'photo'
+  /**
+   * Luminance cutoff separating ink from paper, derived once at preload.
+   * Only meaningful in 'ink' mode.
+   */
   inkThreshold: number
 }
 
@@ -114,8 +162,8 @@ function otsuThreshold(data: Uint8ClampedArray): number {
   return best
 }
 
-let cachedSample: Sample | null = null
-let pendingLoad: Promise<Sample> | null = null
+const cachedSamples = new Map<PortraitId, Sample>()
+const pendingLoads = new Map<PortraitId, Promise<Sample>>()
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -123,11 +171,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     img.crossOrigin = 'anonymous'
     img.onload = () => resolve(img)
     img.onerror = () =>
-      reject(
-        new Error(
-          `Could not load the portrait image at "${src}". Save the drawing to public/gurudev.png.`,
-        ),
-      )
+      reject(new Error(`Could not load the portrait image at "${src}".`))
     img.src = src
   })
 }
@@ -137,16 +181,20 @@ function loadImage(src: string): Promise<HTMLImageElement> {
  * sampling can run synchronously later — the assemble command needs to fire
  * everywhere at the same moment, with no image-decode latency in the way.
  */
-export function preloadPortrait(): Promise<Sample> {
-  if (cachedSample) return Promise.resolve(cachedSample)
-  if (pendingLoad) return pendingLoad
+export function preloadPortrait(id: PortraitId = DEFAULT_PORTRAIT): Promise<Sample> {
+  const cached = cachedSamples.get(id)
+  if (cached) return Promise.resolve(cached)
+  const pending = pendingLoads.get(id)
+  if (pending) return pending
 
-  pendingLoad = loadImage(PORTRAIT_SRC).then((img) => {
-    // Source rectangle: the artwork with the photo's dark edge bands trimmed.
-    const sx = img.width * CROP.left
-    const sy = img.height * CROP.top
-    const sw = Math.max(1, img.width * (1 - CROP.left - CROP.right))
-    const sh = Math.max(1, img.height * (1 - CROP.top - CROP.bottom))
+  const source = PORTRAITS[id]
+  const load = loadImage(source.src).then((img) => {
+    const { crop, mode } = source
+    // Source rectangle: the artwork with any edge bands trimmed.
+    const sx = img.width * crop.left
+    const sy = img.height * crop.top
+    const sw = Math.max(1, img.width * (1 - crop.left - crop.right))
+    const sh = Math.max(1, img.height * (1 - crop.top - crop.bottom))
 
     const scale = Math.min(1, SAMPLE_MAX_DIM / Math.max(sw, sh))
     const width = Math.max(1, Math.round(sw * scale))
@@ -156,28 +204,35 @@ export function preloadPortrait(): Promise<Sample> {
     canvas.width = width
     canvas.height = height
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!
-    // Flatten onto white first: the drawing may have transparency, and
-    // untouched transparent pixels would otherwise read as pure black ink.
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, width, height)
+    if (mode === 'ink') {
+      // Flatten onto white first: the drawing may have transparency, and
+      // untouched transparent pixels would otherwise read as pure black ink.
+      // Emphatically NOT done for a photo, whose alpha channel *is* the
+      // subject mask — flattening it would erase the cutout.
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, width, height)
+    }
     ctx.drawImage(img, sx, sy, sw, sh, 0, 0, width, height)
 
     const data = ctx.getImageData(0, 0, width, height).data
-    cachedSample = {
+    const sample: Sample = {
       data,
       width,
       height,
-      inkThreshold: INK_THRESHOLD_OVERRIDE ?? otsuThreshold(data),
+      mode,
+      inkThreshold: mode === 'ink' ? (INK_THRESHOLD_OVERRIDE ?? otsuThreshold(data)) : 0,
     }
-    pendingLoad = null
-    return cachedSample
+    cachedSamples.set(id, sample)
+    pendingLoads.delete(id)
+    return sample
   })
 
-  return pendingLoad
+  pendingLoads.set(id, load)
+  return load
 }
 
-export function isPortraitReady(): boolean {
-  return cachedSample !== null
+export function isPortraitReady(id: PortraitId = DEFAULT_PORTRAIT): boolean {
+  return cachedSamples.has(id)
 }
 
 interface Cell {
@@ -255,6 +310,109 @@ function inkCells(sample: Sample, cols: number): { cells: Cell[]; rows: number }
   return { cells, rows }
 }
 
+/**
+ * Boosts a sampled colour's saturation and contrast, and returns it packed.
+ *
+ * Necessary because a puff is a soft-edged sprite: it composites partly over
+ * whatever is behind it, so a mosaic built from raw sampled colours arrives
+ * on screen noticeably paler and flatter than the photograph it came from.
+ */
+function vividTint(r: number, g: number, b: number): number {
+  const rn = r / 255
+  const gn = g / 255
+  const bn = b / 255
+  const max = Math.max(rn, gn, bn)
+  const min = Math.min(rn, gn, bn)
+  const l = (max + min) / 2
+  const d = max - min
+
+  let h = 0
+  if (d !== 0) {
+    if (max === rn) h = ((gn - bn) / d) % 6
+    else if (max === gn) h = (bn - rn) / d + 2
+    else h = (rn - gn) / d + 4
+    h *= 60
+  }
+  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1))
+
+  const s2 = Math.min(1, s * PHOTO_SATURATION)
+  const l2 = Math.min(1, Math.max(0, 0.5 + (l - 0.5) * PHOTO_CONTRAST))
+
+  const c = (1 - Math.abs(2 * l2 - 1)) * s2
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = l2 - c / 2
+  let rr = 0
+  let gg = 0
+  let bb = 0
+  if (h < 60) [rr, gg, bb] = [c, x, 0]
+  else if (h < 120) [rr, gg, bb] = [x, c, 0]
+  else if (h < 180) [rr, gg, bb] = [0, c, x]
+  else if (h < 240) [rr, gg, bb] = [0, x, c]
+  else if (h < 300) [rr, gg, bb] = [x, 0, c]
+  else [rr, gg, bb] = [c, 0, x]
+
+  const byte = (v: number) => Math.min(255, Math.max(0, Math.round((v + m) * 255)))
+  return (byte(rr) << 16) | (byte(gg) << 8) | byte(bb)
+}
+
+// Decides which grid cells are part of a cut-out photo, and what colour each
+// one's puff should be. Same signature and row-major contract as inkCells.
+//
+// The ink logic can't be reused here even loosely: it keeps a cell only if
+// enough of it is *dark*, which for a photograph would throw away the face,
+// the white robe, and every highlight, leaving a portrait made of nothing but
+// its own shadows. It also deepens tints toward black by coverage, which is
+// right for preserving a pencil drawing's tonal range and ruinous for real
+// colour. Here the alpha channel already says exactly which pixels are the
+// subject, so that is the only test needed.
+function photoCells(sample: Sample, cols: number): { cells: Cell[]; rows: number } {
+  const rows = Math.max(1, Math.round((cols * sample.height) / sample.width))
+  const cellW = sample.width / cols
+  const cellH = sample.height / rows
+  const cells: Cell[] = []
+
+  for (let row = 0; row < rows; row++) {
+    const y0 = Math.floor(row * cellH)
+    const y1 = Math.max(y0 + 1, Math.floor((row + 1) * cellH))
+    for (let col = 0; col < cols; col++) {
+      const x0 = Math.floor(col * cellW)
+      const x1 = Math.max(x0 + 1, Math.floor((col + 1) * cellW))
+
+      // Average the opaque pixels only. Including transparent ones would drag
+      // every edge cell toward black and outline the subject in a dark rim.
+      let r = 0
+      let g = 0
+      let b = 0
+      let opaque = 0
+      let n = 0
+      for (let y = y0; y < y1 && y < sample.height; y++) {
+        for (let x = x0; x < x1 && x < sample.width; x++) {
+          const i = (y * sample.width + x) * 4
+          n++
+          if (sample.data[i + 3] < 128) continue
+          r += sample.data[i]
+          g += sample.data[i + 1]
+          b += sample.data[i + 2]
+          opaque++
+        }
+      }
+      if (n === 0 || opaque / n < PHOTO_ALPHA_COVERAGE) continue
+
+      cells.push({
+        col,
+        row,
+        tint: vividTint(r / opaque, g / opaque, b / opaque),
+      })
+    }
+  }
+
+  return { cells, rows }
+}
+
+function cellsFor(sample: Sample, cols: number): { cells: Cell[]; rows: number } {
+  return sample.mode === 'photo' ? photoCells(sample, cols) : inkCells(sample, cols)
+}
+
 // Ink-cell count rises with grid resolution, so a binary search finds the
 // finest grid the available puffs can still fill *completely*. Erring on the
 // side of too few cells matters: leftover puffs can double up and thicken
@@ -265,7 +423,7 @@ function colsForCount(sample: Sample, count: number): number {
   let hi = MAX_COLS
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2)
-    if (inkCells(sample, mid).cells.length <= count) lo = mid
+    if (cellsFor(sample, mid).cells.length <= count) lo = mid
     else hi = mid - 1
   }
   return lo
@@ -277,16 +435,17 @@ function colsForCount(sample: Sample, count: number): number {
  * the portrait is centred on (centerX, centerY).
  */
 export function buildPortraitLayout(
+  id: PortraitId,
   count: number,
   cellSize: number,
   centerX: number,
   centerY: number,
 ): PortraitLayout {
-  const sample = cachedSample
+  const sample = cachedSamples.get(id)
   if (!sample) throw new Error('preloadPortrait() must resolve before buildPortraitLayout()')
 
   const cols = colsForCount(sample, count)
-  const { cells, rows } = inkCells(sample, cols)
+  const { cells, rows } = cellsFor(sample, cols)
 
   const width = cols * cellSize
   const height = rows * cellSize
