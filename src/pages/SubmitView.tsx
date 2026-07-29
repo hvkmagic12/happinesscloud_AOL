@@ -55,15 +55,18 @@ export default function SubmitView() {
 
   return (
     <div className="submit-view">
-      <div className="submit-card">
-        <blockquote className="submit-quote">
-          <p className="submit-quote-text">{GURUDEV_QUOTE}</p>
-          <footer className="submit-quote-source">{GURUDEV_QUOTE_SOURCE}</footer>
-        </blockquote>
+      {/* The invitation sits outside the card, so it reads as a lead-in to
+          the whole thing rather than as part of the quote. */}
+      <div className="submit-shell">
         <p className="submit-invite">
           We invite you to share your response to the below quote by Gurudev
         </p>
-        <form onSubmit={handleSubmit}>
+        <div className="submit-card">
+          <blockquote className="submit-quote">
+            <p className="submit-quote-text">{GURUDEV_QUOTE}</p>
+            <footer className="submit-quote-source">{GURUDEV_QUOTE_SOURCE}</footer>
+          </blockquote>
+          <form onSubmit={handleSubmit}>
           <div className="submit-name-row">
             <input
               type="text"
@@ -107,7 +110,8 @@ export default function SubmitView() {
             {submitting ? 'Sending…' : 'Send it up'}
           </button>
           {error && <p className="submit-error">{error}</p>}
-        </form>
+          </form>
+        </div>
       </div>
     </div>
   )

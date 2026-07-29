@@ -15,13 +15,28 @@
   background: linear-gradient(180deg, #bfe3ff 0%, #dff0ff 45%, #fdeef6 100%);
 }
 
-.submit-card {
+/* Wraps the invitation and the card so the pair centres as one block.
+   Centres when there's room and scrolls when there isn't — `align-items:
+   center` on the parent would centre it too, but then the top of an over-tall
+   block is clipped and unreachable. */
+.submit-shell {
   width: 100%;
   max-width: 440px;
-  /* Centres when there's room and scrolls when there isn't. `align-items:
-     center` on the parent would centre it too, but then the top of an
-     over-tall card is clipped and unreachable. */
   margin: auto;
+}
+
+.submit-invite {
+  margin: 0 0 14px;
+  text-align: center;
+  font-size: 15px;
+  line-height: 1.45;
+  /* Sits on the page gradient rather than the card, so it needs its own
+     contrast against the pale blue. */
+  color: #46405c;
+}
+
+.submit-card {
+  width: 100%;
   background: rgba(255, 255, 255, 0.85);
   border-radius: 20px;
   box-shadow: 0 20px 60px rgba(80, 60, 120, 0.15);
